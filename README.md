@@ -32,7 +32,7 @@ omarchy plugin add ~/Projects/battery --enable
 Or from a git remote once published:
 
 ```
-omarchy plugin add https://github.com/<you>/battery.git --enable
+omarchy plugin add https://github.com/tymurbogach/battery.git --enable
 ```
 
 Then put it on the bar (replaces `omarchy.power` or `io.github.aryan-techie.battery`):
