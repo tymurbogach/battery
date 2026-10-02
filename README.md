@@ -52,10 +52,10 @@ omarchy bar move cyberdyne.battery --section right
 ## How it works
 
 - **Profiles**: `omarchy-powerprofiles-set <ac|battery> <profile>` on manual pick (writes the native state file). `hypr-profile-auto` polls `omarchy-power-present` (sysfs) every 5s and restores the remembered profile on cable change, logging to `~/.local/state/omarchy/powerprofiles/ac-watch.log`.
-- **Refresh**: read-only via `hyprctl monitors -j` (focused monitor first). Never written by this widget.
+- **Refresh**: the toggle stores 60/120 per profile in settings and writes `~/.local/state/omarchy/toggles/hypr/refresh-override-hz`, which `hypr-refresh-auto` enforces (overriding its AC=120/battery=60 source logic). Live rate shown read-only via `hyprctl monitors -j`.
 - **Threshold**: `gdbus call` against `org.freedesktop.UPower` for `ChargeThresholdEnabled` read and `EnableChargeThreshold` write, targeting `upower -e | grep BAT`.
 - **Draw history**: reuses the `rate` field from every `omarchy-battery-status --shell` sample in a rolling 600s window.
-- **Settings**: only `showPercentage`. Stored inline on the bar entry via `updateEntryInline`.
+- **Settings**: `showPercentage`, `hz_power-saver`, `hz_balanced`, `hz_performance`. Stored inline on the bar entry via `updateEntryInline`.
 
 ## External dependencies
 
@@ -71,7 +71,13 @@ omarchy bar move cyberdyne.battery --section right
 omarchy plugin remove cyberdyne.battery
 ```
 
-Re-add `omarchy.power` to the bar if you want the stock widget back. Removal leaves the native `~/.local/state/omarchy/powerprofiles/` files untouched (they belong to Omarchy, not to this plugin).
+Re-add `omarchy.power` to the bar if you want the stock widget back. Removal leaves the native `~/.local/state/omarchy/powerprofiles/` files untouched (they belong to Omarchy, not to this plugin). Also delete the refresh override if you no longer want per-profile rates:
+
+```
+rm -f ~/.local/state/omarchy/toggles/hypr/refresh-override-hz
+```
+
+(without it, `hypr-refresh-auto` falls back to 120Hz on AC / 60Hz on battery).
 
 ## Changelog
 

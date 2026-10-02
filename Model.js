@@ -114,6 +114,35 @@ function appendDrainSample(samples, watts, now, maxAgeSeconds) {
   return next
 }
 
+// ---- Per-profile 120Hz toggle. Each power profile remembers its own
+// refresh rate (60 or 120); hypr-refresh-auto enforces the override file.
+function defaultHzForProfile(profile) {
+  if (profile === "power-saver") return 60
+  return 120
+}
+
+function hzSettingKey(profile) {
+  if (profile === "power-saver") return "hz_power-saver"
+  if (profile === "balanced") return "hz_balanced"
+  if (profile === "performance") return "hz_performance"
+  return ""
+}
+
+function normalizeHz(value, fallback) {
+  var n = Number(value)
+  if (n === 60 || n === 120) return n
+  return fallback
+}
+
+function hzForProfile(profile, storedValue) {
+  return normalizeHz(storedValue, defaultHzForProfile(profile))
+}
+
+function prettyProfile(profile) {
+  var name = String(profile || "")
+  return name === "" ? "…" : (name.charAt(0).toUpperCase() + name.slice(1))
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     clampIndex: clampIndex,
@@ -127,6 +156,11 @@ if (typeof module !== "undefined") {
     modeLabel: modeLabel,
     parseGdbusBoolean: parseGdbusBoolean,
     parseWattsRate: parseWattsRate,
-    appendDrainSample: appendDrainSample
+    appendDrainSample: appendDrainSample,
+    defaultHzForProfile: defaultHzForProfile,
+    hzSettingKey: hzSettingKey,
+    normalizeHz: normalizeHz,
+    hzForProfile: hzForProfile,
+    prettyProfile: prettyProfile
   }
 }

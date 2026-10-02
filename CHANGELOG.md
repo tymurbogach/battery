@@ -2,6 +2,17 @@
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.5.0 — Per-profile 120Hz toggle
+
+### Added
+
+- Single 120Hz on/off toggle saved independently per power profile (defaults saver 60, balanced/performance 120). Writes the override file `refresh-override-hz` that `hypr-refresh-auto` enforces; picking a profile, flipping the toggle, or opening the panel with a changed active profile applies that profile's rate.
+- `hypr-refresh-auto` honors the override (60/120 win over source logic; missing or invalid file falls back to 120Hz AC / 60Hz battery). Verified live: 60, 120, garbage, and removal all behave.
+
+### Removed
+
+- Display-refresh read-only section (replaced by the toggle, whose subtitle shows the live rate).
+
 ## v0.4.0 — Daemon owns auto-switch
 
 ### Added

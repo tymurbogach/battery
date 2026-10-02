@@ -33,6 +33,10 @@ Panel {
   property bool chargeThresholdEnabled: false
   property var drainSamples: []
   property var currentMonitor: null
+  // Last profile whose Hz was written to the override file. Guards the
+  // open-sync in updateProfiles so it writes once per change, not on every
+  // 5s refresh while the panel stays open.
+  property string hzAppliedFor: ""
 
   readonly property bool batteryPresent: {
     var device = UPower.displayDevice
@@ -204,16 +208,56 @@ Panel {
       var idx = profiles.indexOf(activeProfile)
       if (idx >= 0) profileIndex = idx
     }
+    // Enforce the per-profile Hz invariant when the active profile changed
+    // somewhere else (menu, CLI, plug/unplug service) while open.
+    if (root.opened && root.activeProfile !== "" && root.hzAppliedFor !== root.activeProfile) {
+      root.hzAppliedFor = root.activeProfile
+      root.writeHzOverride(root.hzForProfile(root.activeProfile))
+    }
   }
 
   // Manual pick for the current source (powerON = AC, powerOFF = battery).
   // omarchy-powerprofiles-set persists it in the native per-source state
-  // file; the omarchy.battery service restores it automatically on the next
-  // plug/unplug switch. This widget never auto-applies profiles itself.
+  // file; hypr-profile-auto restores it automatically on plug/unplug.
+  // Applies this profile's remembered Hz as well.
   function setProfile(profile) {
     if (!profile || actionProc.running) return
     actionProc.command = ["omarchy-powerprofiles-set", root.sourceKey(), profile]
     actionProc.running = true
+    root.hzAppliedFor = profile
+    root.writeHzOverride(root.hzForProfile(profile))
+  }
+
+  // ---- Per-profile 120Hz toggle. The value is stored in settings under the
+  // profile's key and enforced through the override file that
+  // hypr-refresh-auto watches (60 or 120 only). The daemon applies it within
+  // seconds; the monitor line underneath shows the live rate.
+  function hzForProfile(profile) {
+    var key = Model.hzSettingKey(profile)
+    if (key === "") return 120
+    return Model.hzForProfile(profile, setting(key, Model.defaultHzForProfile(profile)))
+  }
+
+  function writeHzOverride(rate) {
+    if (hzWriteProc.running) return
+    hzWriteProc.command = ["bash", "-c",
+      'd="$HOME/.local/state/omarchy/toggles/hypr"; mkdir -p "$d" && printf "%s" "$1" > "$d/refresh-override-hz"',
+      "_", String(rate)]
+    hzWriteProc.running = true
+  }
+
+  function toggleHz() {
+    var profile = root.activeProfile
+    if (!profile || root.profiles.indexOf(profile) < 0) return
+    var key = Model.hzSettingKey(profile)
+    if (key === "") return
+    var next = root.hzForProfile(profile) === 120 ? 60 : 120
+    var patch = {}
+    patch[key] = next
+    root.updateSettings(patch)
+    root.hzAppliedFor = profile
+    root.writeHzOverride(next)
+    if (!monitorReadProc.running) monitorReadProc.running = true
   }
 
   // Read-only monitor discovery for the status line. Refresh rate is owned
@@ -334,6 +378,9 @@ Panel {
     command: ["hyprctl", "monitors", "-j"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.handleMonitorsOutput(text) }
   }
+
+  // Writes the per-profile Hz override file watched by hypr-refresh-auto.
+  Process { id: hzWriteProc }
 
   Component.onCompleted: {
     if (root.batteryPresent && !monitorReadProc.running) monitorReadProc.running = true
@@ -626,7 +673,8 @@ Panel {
           }
         }
 
-        // ---------- Refresh rate (read-only). Owned by hypr-refresh-auto. ---
+        // ---------- Refresh: one 120Hz toggle per profile. The daemon
+        // enforces the override file within seconds. ------------------------
         Column {
           width: parent.width
           spacing: Style.space(10)
@@ -639,25 +687,15 @@ Panel {
             fontFamily: root.bar.fontFamily
           }
 
-          Text {
-            textFormat: Text.PlainText
-            text: root.monitorStatusText
-            color: root.bar.foreground
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            elide: Text.ElideRight
+          Toggle {
             width: parent.width
-          }
-
-          Text {
-            textFormat: Text.PlainText
-            text: "Managed by hypr-refresh-auto (120Hz AC · 60Hz battery)"
-            color: root.bar.foreground
-            opacity: 0.6
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            elide: Text.ElideRight
-            width: parent.width
+            label: "120Hz in " + Model.prettyProfile(root.activeProfile)
+            description: root.monitorStatusText
+            checked: root.hzForProfile(root.activeProfile) === 120
+            foreground: root.bar.foreground
+            accent: Color.accent
+            fontFamily: root.bar.fontFamily
+            onClicked: root.toggleHz()
           }
         }
 
