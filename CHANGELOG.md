@@ -2,6 +2,26 @@
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.6.0 — Silent-failure hardening
+
+### Fixed
+
+- `NaN` guards on fraction, icon, tooltip, button text, and sparkline. Unknown state renders `—` or `Unknown`, never `NaN%`.
+- Charge-threshold false positive without telemetry. Missing `changeRate` no longer reports `Threshold`.
+- Threshold D-Bus calls use plain argv in two steps (`upower -e` resolve, then `gdbus`). No shell interpolation. Polkit denials and read failures show in the panel.
+- `bar` null guards via `fg` / `ff` helpers (startup and recreation window).
+- Every `Process` reports `stderr` and non-zero exit. `STALE` banner after 2 consecutive failures. 10s watchdog kills hung queries.
+- `hzAppliedFor` marks only on successful override write. Profile buttons disable while a switch runs.
+- `0W` samples count. Drain records discharge only. Window capped at 200 samples. Clock jumps reset instead of growing.
+- Polling: CLI fields every 15s, monitor rate every 30s (was 5s triple poll).
+
+### Changed
+
+- Left/middle click split: left toggles the panel, right toggles percentage. Middle click no longer opens the panel.
+- Placeholders unified to `—`. `InfoPair` no longer uses positional child indexes.
+- Phrase animation stops on panel close. Charge pulse no longer uses `alwaysRunToEnd`.
+- README gains `Configure`, `Requirements`, and `Remove` sections. Daemons documented as optional and not bundled. Legacy `refreshAc` / `refreshBatt` documented as ignored.
+
 ## v0.5.0 — Per-profile 120Hz toggle
 
 ### Added

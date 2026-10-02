@@ -31,12 +31,26 @@ Panel {
   // This widget only picks profiles manually, toggles the charge threshold,
   // and shows read-only status. One writer per subsystem.
   property bool chargeThresholdEnabled: false
+  property string chargeThresholdError: ""
+  property string batteryDbusPath: ""
   property var drainSamples: []
   property var currentMonitor: null
   // Last profile whose Hz was written to the override file. Guards the
   // open-sync in updateProfiles so it writes once per change, not on every
-  // 5s refresh while the panel stays open.
+  // refresh while the panel stays open. Only set on successful write.
   property string hzAppliedFor: ""
+  property string hzPendingFor: ""
+  // Consecutive empty/failed refreshes. After 2 the panel marks data stale
+  // instead of showing the last known good forever.
+  property int refreshFailCount: 0
+  readonly property bool dataStale: refreshFailCount >= 2
+  property string lastError: ""
+  property bool profileBusy: false
+
+  // Guarded bar theme access. bar is null during startup/recreation;
+  // content must not throw TypeError in that window.
+  readonly property color fg: root.bar ? root.fg : Color.foreground
+  readonly property string ff: root.bar ? root.ff : Style.font.family
 
   readonly property bool batteryPresent: {
     var device = UPower.displayDevice
@@ -102,7 +116,7 @@ Panel {
   }
 
   readonly property color batteryFillColor: {
-    return root.bar ? root.bar.foreground : Color.foreground
+    return root.fg
   }
 
   // Source helpers: "ac" = powerON (plugged), "battery" = powerOFF.
@@ -121,10 +135,15 @@ Panel {
 
   readonly property string buttonTooltip: {
     if (!batteryPresent) return ""
-    var pct = root.batteryInfo.percentage || Math.round(root.batteryFraction * 100) + "%"
+    var pctText = root.batteryInfo.percentage
+    if (!pctText) {
+      var f = root.batteryFraction
+      pctText = isFinite(f) ? Math.round(f * 100) + "%" : "—"
+    }
     var src = root.discharging ? "Battery" : "AC"
     var extra = root.batteryInfo.time ? " · " + root.batteryInfo.time : ""
-    return src + " · " + pct + extra
+    var stale = root.dataStale ? " (stale)" : ""
+    return src + " · " + pctText + extra + stale
   }
 
   readonly property string monitorStatusText: {
@@ -176,17 +195,32 @@ Panel {
 
   function refresh() {
     if (!batteryPresent) return
-
+    stallTimer.restart()
     if (!batteryProc.running) batteryProc.running = true
     if (!profilesProc.running) profilesProc.running = true
     if (!systemProc.running) systemProc.running = true
+  }
+
+  function noteRefreshSuccess() {
+    refreshFailCount = 0
+    lastError = ""
+  }
+
+  function noteRefreshFailure(msg) {
+    refreshFailCount = Math.min(99, refreshFailCount + 1)
+    if (msg) lastError = msg
   }
 
   function updateKeyValue(raw, targetName) {
     var next = Model.parseKeyValue(raw)
     // Keep last known good data if a refresh briefly returns nothing — happens
     // around AC plug/unplug events. Avoids the section collapsing mid-transition.
-    if (Object.keys(next).length === 0) return
+    // After consecutive failures mark stale instead of trusting old data forever.
+    if (Object.keys(next).length === 0) {
+      root.noteRefreshFailure(targetName + " empty")
+      return
+    }
+    root.noteRefreshSuccess()
     if (targetName === "battery") {
       batteryInfo = next
       root.recordDrainSample()
@@ -200,7 +234,11 @@ Panel {
     var parsed = Model.parseProfiles(raw, profileIndex)
     // Same guard as battery: preserve the last known profile list across
     // transient empty payloads so the buttons don't blink out.
-    if (parsed.profiles.length === 0) return
+    if (parsed.profiles.length === 0) {
+      root.noteRefreshFailure("profiles empty")
+      return
+    }
+    root.noteRefreshSuccess()
     profiles = parsed.profiles
     activeProfile = parsed.activeProfile
     profileIndex = parsed.profileIndex
@@ -210,8 +248,10 @@ Panel {
     }
     // Enforce the per-profile Hz invariant when the active profile changed
     // somewhere else (menu, CLI, plug/unplug service) while open.
-    if (root.opened && root.activeProfile !== "" && root.hzAppliedFor !== root.activeProfile) {
-      root.hzAppliedFor = root.activeProfile
+    // Mark applied only on successful write; queue pending otherwise.
+    if (root.opened && root.activeProfile !== "" && root.hzAppliedFor !== root.activeProfile
+        && root.profiles.indexOf(root.activeProfile) >= 0) {
+      root.hzPendingFor = root.activeProfile
       root.writeHzOverride(root.hzForProfile(root.activeProfile))
     }
   }
@@ -221,10 +261,11 @@ Panel {
   // file; hypr-profile-auto restores it automatically on plug/unplug.
   // Applies this profile's remembered Hz as well.
   function setProfile(profile) {
-    if (!profile || actionProc.running) return
+    if (!profile || root.profileBusy) return
+    root.profileBusy = true
     actionProc.command = ["omarchy-powerprofiles-set", root.sourceKey(), profile]
     actionProc.running = true
-    root.hzAppliedFor = profile
+    root.hzPendingFor = profile
     root.writeHzOverride(root.hzForProfile(profile))
   }
 
@@ -238,11 +279,20 @@ Panel {
     return Model.hzForProfile(profile, setting(key, Model.defaultHzForProfile(profile)))
   }
 
+  function hzOverrideDir() {
+    return (Quickshell.env("HOME") || "") + "/.local/state/omarchy/toggles/hypr"
+  }
+
   function writeHzOverride(rate) {
     if (hzWriteProc.running) return
+    var dir = root.hzOverrideDir()
+    if (!dir || dir === "/.local/state/omarchy/toggles/hypr") {
+      root.lastError = "HOME unset, cannot write Hz override"
+      return
+    }
     hzWriteProc.command = ["bash", "-c",
-      'd="$HOME/.local/state/omarchy/toggles/hypr"; mkdir -p "$d" && printf "%s" "$1" > "$d/refresh-override-hz"',
-      "_", String(rate)]
+      'mkdir -p "$2" && printf "%s" "$1" > "$2/refresh-override-hz"',
+      "_", String(rate), dir]
     hzWriteProc.running = true
   }
 
@@ -255,7 +305,7 @@ Panel {
     var patch = {}
     patch[key] = next
     root.updateSettings(patch)
-    root.hzAppliedFor = profile
+    root.hzPendingFor = profile
     root.writeHzOverride(next)
     if (!monitorReadProc.running) monitorReadProc.running = true
   }
@@ -263,15 +313,16 @@ Panel {
   // Read-only monitor discovery for the status line. Refresh rate is owned
   // by hypr-refresh-auto -- this never writes monitor configuration.
   function handleMonitorsOutput(text) {
-    var monitors = []
-    try { monitors = JSON.parse(String(text || "[]")) } catch (e) { monitors = [] }
-    for (var i = 0; i < monitors.length; i++) {
-      if (monitors[i] && monitors[i].focused) {
-        root.currentMonitor = monitors[i]
+    var parsed = null
+    try { parsed = JSON.parse(String(text || "")) } catch (e) { parsed = null }
+    if (!Array.isArray(parsed) || parsed.length === 0) return
+    for (var i = 0; i < parsed.length; i++) {
+      if (parsed[i] && parsed[i].focused) {
+        root.currentMonitor = parsed[i]
         return
       }
     }
-    if (monitors.length > 0) root.currentMonitor = monitors[0]
+    root.currentMonitor = parsed[0]
   }
 
   function togglePercentage() {
@@ -283,24 +334,53 @@ Panel {
   // writing the sysfs threshold file directly, which is root-owned. The
   // percentages themselves (e.g. 75-80%) stay as firmware reports them --
   // this only flips whether the limit is enforced.
+  // Two steps with plain argv, no shell interpolation: first resolve the
+  // battery object path via `upower -e`, then call gdbus with that path.
   function refreshChargeThreshold() {
     if (!root.batteryInfo.threshold) return
-    chargeThresholdReadProc.command = ["bash", "-c",
-      'gdbus call --system --dest org.freedesktop.UPower --object-path "$(upower -e | grep BAT | head -1)" --method org.freedesktop.DBus.Properties.Get org.freedesktop.UPower.Device ChargeThresholdEnabled']
-    chargeThresholdReadProc.running = true
+    if (root.batteryDbusPath !== "") {
+      chargeThresholdReadProc.command = ["gdbus", "call", "--system",
+        "--dest", "org.freedesktop.UPower",
+        "--object-path", root.batteryDbusPath,
+        "--method", "org.freedesktop.DBus.Properties.Get",
+        "org.freedesktop.UPower.Device", "ChargeThresholdEnabled"]
+      chargeThresholdReadProc.running = true
+      return
+    }
+    if (!upowerEnumProc.running) upowerEnumProc.running = true
+  }
+
+  function handleUpowerEnum(text) {
+    var path = Model.parseBatteryDbusPath(text)
+    if (!path) {
+      root.chargeThresholdError = "No battery device found"
+      return
+    }
+    root.batteryDbusPath = path
+    root.refreshChargeThreshold()
   }
 
   function toggleChargeThreshold() {
     if (chargeThresholdActionProc.running) return
+    if (!root.batteryDbusPath) {
+      root.chargeThresholdError = "Battery path unknown, retrying"
+      root.refreshChargeThreshold()
+      return
+    }
     var next = !root.chargeThresholdEnabled
-    chargeThresholdActionProc.command = ["bash", "-c",
-      'gdbus call --system --dest org.freedesktop.UPower --object-path "$(upower -e | grep BAT | head -1)" --method org.freedesktop.UPower.Device.EnableChargeThreshold "$1"',
-      "_", next ? "true" : "false"]
+    chargeThresholdActionProc.command = ["gdbus", "call", "--system",
+      "--dest", "org.freedesktop.UPower",
+      "--object-path", root.batteryDbusPath,
+      "--method", "org.freedesktop.UPower.Device.EnableChargeThreshold",
+      next ? "true" : "false"]
     chargeThresholdActionProc.running = true
   }
 
   function recordDrainSample() {
-    var watts = Model.parseWattsRate(root.batteryInfo.rate)
+    // Record draw only while discharging; while charging the rate field
+    // is charge current, not draw. Pass null otherwise so the window still
+    // prunes by age instead of freezing.
+    var watts = root.discharging ? Model.parseWattsRate(root.batteryInfo.rate) : null
     root.drainSamples = Model.appendDrainSample(root.drainSamples, watts, Date.now() / 1000, 600)
   }
 
@@ -340,23 +420,57 @@ Panel {
     id: batteryProc
     command: ["omarchy-battery-status", "--shell"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.updateKeyValue(text, "battery") }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text && String(text).trim() !== "") root.noteRefreshFailure("battery: " + String(text).trim().slice(0, 120))
+    }
+    onExited: function(code) { if (code !== 0) root.noteRefreshFailure("battery exit " + code) }
   }
 
   Process {
     id: profilesProc
     command: ["omarchy-powerprofiles-list", "--active-state"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.updateProfiles(text) }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text && String(text).trim() !== "") root.noteRefreshFailure("profiles: " + String(text).trim().slice(0, 120))
+    }
+    onExited: function(code) { if (code !== 0) root.noteRefreshFailure("profiles exit " + code) }
   }
 
   Process {
     id: systemProc
     command: ["omarchy-system-stats"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.updateKeyValue(text, "system") }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text && String(text).trim() !== "") root.noteRefreshFailure("system: " + String(text).trim().slice(0, 120))
+    }
+    onExited: function(code) { if (code !== 0) root.noteRefreshFailure("system exit " + code) }
   }
 
   Process {
     id: actionProc
-    onExited: root.refresh()
+    stderr: StdioCollector { waitForEnd: true; id: actionStderr }
+    onExited: function(code) {
+      root.profileBusy = false
+      if (code !== 0) {
+        root.lastError = "Profile switch failed (exit " + code + ")"
+        if (actionStderr.text) root.lastError += ": " + String(actionStderr.text).trim().slice(0, 120)
+      }
+      root.refresh()
+    }
+  }
+
+  Process {
+    id: upowerEnumProc
+    command: ["upower", "-e"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.handleUpowerEnum(text) }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text && String(text).trim() !== "") root.chargeThresholdError = String(text).trim().slice(0, 160)
+    }
+    onExited: function(code) { if (code !== 0) root.chargeThresholdError = "upower -e failed (exit " + code + ")" }
   }
 
   Process {
@@ -365,28 +479,83 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         var value = Model.parseGdbusBoolean(text)
-        if (value !== null) root.chargeThresholdEnabled = value
+        if (value !== null) {
+          root.chargeThresholdEnabled = value
+          root.chargeThresholdError = ""
+        } else {
+          root.chargeThresholdError = "Threshold read failed"
+        }
       }
     }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text && String(text).trim() !== "") root.chargeThresholdError = String(text).trim().slice(0, 160)
+    }
+    onExited: function(code) { if (code !== 0 && !root.chargeThresholdError) root.chargeThresholdError = "Threshold read exit " + code }
   }
 
-  Process { id: chargeThresholdActionProc; onExited: root.refreshChargeThreshold() }
+  Process {
+    id: chargeThresholdActionProc
+    stderr: StdioCollector { waitForEnd: true; id: thresholdActionStderr }
+    onExited: function(code) {
+      if (code !== 0) {
+        root.chargeThresholdError = "Threshold toggle denied (exit " + code + "). Check polkit agent."
+        if (thresholdActionStderr.text) root.chargeThresholdError += ": " + String(thresholdActionStderr.text).trim().slice(0, 120)
+      } else {
+        root.chargeThresholdError = ""
+      }
+      root.refreshChargeThreshold()
+    }
+  }
 
   // Read-only: feeds the refresh status line. Never writes monitors.
   Process {
     id: monitorReadProc
     command: ["hyprctl", "monitors", "-j"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.handleMonitorsOutput(text) }
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: function(code) { if (code !== 0) root.lastError = "hyprctl monitors exit " + code }
   }
 
   // Writes the per-profile Hz override file watched by hypr-refresh-auto.
-  Process { id: hzWriteProc }
+  Process {
+    id: hzWriteProc
+    stderr: StdioCollector { waitForEnd: true; id: hzWriteStderr }
+    onExited: function(code) {
+      if (code === 0) {
+        root.hzAppliedFor = root.hzPendingFor
+      } else {
+        root.lastError = "Hz override write failed (exit " + code + ")"
+        if (hzWriteStderr.text) root.lastError += ": " + String(hzWriteStderr.text).trim().slice(0, 120)
+      }
+    }
+  }
 
   Component.onCompleted: {
     if (root.batteryPresent && !monitorReadProc.running) monitorReadProc.running = true
   }
 
-  Timer { interval: 5000; running: root.opened; repeat: true; onTriggered: root.refresh() }
+  // Main poll: 15s while open. UPower displayDevice already pushes
+  // presence/state reactively; this only refreshes CLI text fields.
+  Timer { interval: 15000; running: root.opened; repeat: true; onTriggered: root.refresh() }
+
+  // Monitor rate is informational and changes rarely; 30s is enough.
+  Timer { interval: 30000; running: root.opened; repeat: true; onTriggered: if (!monitorReadProc.running) monitorReadProc.running = true }
+
+  // A hung CLI would freeze refresh forever since a running Process
+  // cannot restart. Kill stragglers so the next tick recovers.
+  Timer {
+    id: stallTimer
+    interval: 10000
+    onTriggered: {
+      var killed = false
+      if (batteryProc.running) { batteryProc.running = false; killed = true }
+      if (profilesProc.running) { profilesProc.running = false; killed = true }
+      if (systemProc.running) { systemProc.running = false; killed = true }
+      if (monitorReadProc.running) { monitorReadProc.running = false; killed = true }
+      if (killed) root.noteRefreshFailure("timeout, retrying")
+    }
+  }
 
   // Rotate the status phrase while the panel is open and we're in a
   // rotating state (charging or on battery). The text swap is wrapped in a
@@ -429,21 +598,31 @@ Panel {
         heroStatus.opacity = 1.0
       }
     }
+    function onOpenedChanged() {
+      if (!root.opened) {
+        phraseSwap.stop()
+        if (heroStatus) heroStatus.opacity = 1.0
+      }
+    }
   }
 
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.showPercentage && !vertical
-      ? Math.round(root.batteryFraction * 100) + "% " + root.batteryIcon()
-      : root.batteryIcon()
+    Accessible.name: "Battery " + root.buttonTooltip
+    text: {
+      var icon = root.batteryIcon()
+      if (!(root.showPercentage && !vertical)) return icon
+      var f = root.batteryFraction
+      return (isFinite(f) ? Math.round(f * 100) + "% " : "— ") + icon
+    }
     slotSize: Style.bar.iconSlot * (root.showPercentage && !vertical ? 2 : 1)
     tooltipText: root.buttonTooltip
     onPressed: function(b) {
       if (!root.batteryPresent) return
       if (b === Qt.RightButton) root.togglePercentage()
-      else root.toggle()
+      else if (b === Qt.LeftButton) root.toggle()
     }
   }
 
@@ -485,8 +664,8 @@ Panel {
             id: heroIcon
             textFormat: Text.PlainText
             text: root.batteryIcon()
-            color: root.bar.foreground
-            font.family: root.bar.fontFamily
+            color: root.fg
+            font.family: root.ff
             font.pixelSize: Style.font.display
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
@@ -505,8 +684,8 @@ Panel {
 
             Text {
               text: "Battery"
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
+              color: root.fg
+              font.family: root.ff
               font.pixelSize: Style.font.title
               font.bold: true
               elide: Text.ElideRight
@@ -517,8 +696,8 @@ Panel {
               id: heroStatus
               textFormat: Text.PlainText
               text: root.heroStatusText.toUpperCase()
-              color: Qt.darker(root.bar.foreground, 1.4)
-              font.family: root.bar.fontFamily
+              color: Qt.darker(root.fg, 1.4)
+              font.family: root.ff
               font.pixelSize: Style.font.caption
               font.bold: true
               font.letterSpacing: 1.2
@@ -531,8 +710,8 @@ Panel {
             id: heroPercent
             textFormat: Text.PlainText
             text: root.batteryInfo.percentage || "—"
-            color: root.bar.foreground
-            font.family: root.bar.fontFamily
+            color: root.fg
+            font.family: root.ff
             font.pixelSize: Style.font.displayLarge
             font.bold: true
             anchors.right: parent.right
@@ -551,7 +730,7 @@ Panel {
             id: barTrack
             anchors.fill: parent
             radius: height / 2
-            color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.12)
+            color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.12)
           }
 
           Rectangle {
@@ -570,11 +749,24 @@ Panel {
             SequentialAnimation on opacity {
               running: root.charging && !root.fullyCharged && root.opened
               loops: Animation.Infinite
-              alwaysRunToEnd: true
               NumberAnimation { from: 1.0; to: 0.55; duration: 950; easing.type: Easing.InOutSine }
               NumberAnimation { from: 0.55; to: 1.0; duration: 950; easing.type: Easing.InOutSine }
             }
           }
+        }
+
+        // ---------- Status banner: stale data or visible errors ----------
+        Text {
+          visible: root.dataStale || root.lastError !== ""
+          width: parent.width
+          textFormat: Text.PlainText
+          text: root.dataStale ? ("STALE · " + (root.lastError || "retrying")) : root.lastError
+          color: root.fg
+          opacity: 0.7
+          font.family: root.ff
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+          elide: Text.ElideRight
         }
 
         // ---------- Stats ----------
@@ -584,14 +776,14 @@ Panel {
         // the battery sits above the charge-control start threshold, and we
         // refuse to flicker the whole panel for that ~1s window.
         Row {
-          visible: root.batteryInfo.percentage !== undefined
+          visible: !!root.batteryInfo.percentage
           width: parent.width
           spacing: Style.space(20)
 
           Column {
             width: (parent.width - parent.spacing) / 2
             spacing: Style.spacing.labelGap
-            InfoPair { label: "Battery size"; value: root.batteryInfo.size || "" }
+            InfoPair { label: "Battery size"; value: root.batteryInfo.size || "—" }
             InfoPair { label: "Charge cycles"; value: root.batteryInfo.cycles || "—" }
           }
 
@@ -600,18 +792,18 @@ Panel {
             spacing: Style.spacing.labelGap
             InfoPair {
               label: root.chargeThresholdActive ? "Charge limit" : (root.discharging ? "Time left" : "Time to full")
-              value: root.chargeThresholdActive ? (root.batteryInfo.threshold || "-") : (root.batteryFlowIdle ? "-" : (root.batteryInfo.time || "—"))
+              value: root.chargeThresholdActive ? (root.batteryInfo.threshold || "—") : (root.batteryFlowIdle ? "—" : (root.batteryInfo.time || "—"))
             }
             InfoPair {
               label: root.chargeThresholdActive ? "Battery state" : (root.discharging ? "Discharging" : "Charging")
-              value: root.chargeThresholdActive ? "Holding" : (root.batteryFull ? "-" : (root.batteryInfo.rate || ""))
+              value: root.chargeThresholdActive ? "Holding" : (root.batteryFull ? "—" : (root.batteryInfo.rate || "—"))
             }
           }
         }
 
         // ---------- Power profile per source ----------
         PanelSeparator {
-          foreground: root.bar.foreground
+          foreground: root.fg
         }
 
         Column {
@@ -620,8 +812,8 @@ Panel {
 
           PanelSectionHeader {
             text: "POWER · " + root.sourceLabel()
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
+            foreground: root.fg
+            fontFamily: root.ff
           }
 
           Row {
@@ -630,7 +822,7 @@ Panel {
             spacing: Style.space(6)
 
             readonly property real cellWidth: root.profiles.length > 0
-              ? (width - spacing * (root.profiles.length - 1)) / root.profiles.length
+              ? Math.max(0, (width - spacing * (root.profiles.length - 1)) / root.profiles.length)
               : 0
 
             Repeater {
@@ -639,12 +831,17 @@ Panel {
                 required property var modelData
                 required property int index
                 width: profileRow.cellWidth
-                iconText: root.profileIcon(String(modelData))
+                enabled: !root.profileBusy
+                Accessible.name: "Profile " + String(modelData || "")
+                iconText: root.profileIcon(String(modelData || ""))
                 iconSize: Style.font.title
-                text: String(modelData).charAt(0).toUpperCase() + String(modelData).slice(1)
+                text: {
+                  var s = String(modelData || "")
+                  return s ? s.charAt(0).toUpperCase() + s.slice(1) : "—"
+                }
                 fontSize: Style.font.bodySmall
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
+                foreground: root.fg
+                fontFamily: root.ff
                 horizontalPadding: Style.spacing.controlPaddingX
                 verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
                 bordered: true
@@ -664,9 +861,9 @@ Panel {
           Text {
             textFormat: Text.PlainText
             text: "Auto-switch: hypr-profile-auto daemon"
-            color: root.bar.foreground
+            color: root.fg
             opacity: 0.6
-            font.family: root.bar.fontFamily
+            font.family: root.ff
             font.pixelSize: Style.font.bodySmall
             elide: Text.ElideRight
             width: parent.width
@@ -679,12 +876,12 @@ Panel {
           width: parent.width
           spacing: Style.space(10)
 
-          PanelSeparator { foreground: root.bar.foreground }
+          PanelSeparator { foreground: root.fg }
 
           PanelSectionHeader {
             text: "DISPLAY REFRESH"
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
+            foreground: root.fg
+            fontFamily: root.ff
           }
 
           Toggle {
@@ -692,9 +889,10 @@ Panel {
             label: "120Hz in " + Model.prettyProfile(root.activeProfile)
             description: root.monitorStatusText
             checked: root.hzForProfile(root.activeProfile) === 120
-            foreground: root.bar.foreground
+            enabled: root.profiles.indexOf(root.activeProfile) >= 0
+            foreground: root.fg
             accent: Color.accent
-            fontFamily: root.bar.fontFamily
+            fontFamily: root.ff
             onClicked: root.toggleHz()
           }
         }
@@ -712,18 +910,19 @@ Panel {
             width: parent.width
             spacing: Style.space(10)
 
-            PanelSeparator { foreground: root.bar.foreground }
+            PanelSeparator { foreground: root.fg }
 
             Toggle {
               width: parent.width
               label: "Charge threshold"
-              description: root.batteryInfo.threshold
+              description: root.chargeThresholdError !== "" ? root.chargeThresholdError
+                : root.batteryInfo.threshold
                 ? ("Hold at " + root.batteryInfo.threshold + " to protect battery health")
                 : "Hold charge below the firmware limit"
               checked: root.chargeThresholdEnabled
-              foreground: root.bar.foreground
+              foreground: root.fg
               accent: Color.accent
-              fontFamily: root.bar.fontFamily
+              fontFamily: root.ff
               onClicked: root.toggleChargeThreshold()
             }
           }
@@ -740,7 +939,7 @@ Panel {
             width: parent.width
             spacing: Style.space(6)
 
-            PanelSeparator { foreground: root.bar.foreground }
+            PanelSeparator { foreground: root.fg }
 
             Item {
               width: parent.width
@@ -749,8 +948,8 @@ Panel {
               PanelSectionHeader {
                 id: drainHeader
                 text: "POWER DRAW (LAST 10 MIN)"
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
+                foreground: root.fg
+                fontFamily: root.ff
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
               }
@@ -761,9 +960,11 @@ Panel {
                 id: drainNow
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                text: root.drainSamples.length > 0
-                  ? root.drainSamples[root.drainSamples.length - 1].w.toFixed(1) + "W"
-                  : ""
+                text: {
+                  if (root.drainSamples.length === 0) return ""
+                  var w = root.drainSamples[root.drainSamples.length - 1].w
+                  return isFinite(w) ? Number(w).toFixed(1) + "W" : ""
+                }
               }
             }
 
@@ -779,25 +980,36 @@ Panel {
                 var ctx = getContext("2d")
                 ctx.clearRect(0, 0, width, height)
                 var samples = root.drainSamples
-                if (samples.length < 2) return
+                if (!samples || samples.length < 2 || width <= 0 || height <= 0) return
                 var maxW = 0
-                for (var i = 0; i < samples.length; i++) maxW = Math.max(maxW, samples[i].w)
-                if (maxW <= 0) maxW = 1
+                for (var i = 0; i < samples.length; i++) {
+                  var sw = samples[i] ? samples[i].w : NaN
+                  if (isFinite(sw) && sw > 0) maxW = Math.max(maxW, sw)
+                }
+                if (!(maxW > 0)) maxW = 1
                 var minT = samples[0].t
                 var maxT = samples[samples.length - 1].t
+                if (!isFinite(minT) || !isFinite(maxT)) return
                 var spanT = Math.max(1, maxT - minT)
                 var plotHeight = height - topInset - bottomInset
+                if (plotHeight <= 0) return
 
-                ctx.strokeStyle = Style.selectedStateColor(root.bar.foreground, Color.accent)
+                ctx.strokeStyle = Style.selectedStateColor(root.fg, Color.accent)
                 ctx.lineWidth = 1.5
                 ctx.beginPath()
+                var started = false
                 for (var j = 0; j < samples.length; j++) {
-                  var x = ((samples[j].t - minT) / spanT) * width
-                  var y = topInset + plotHeight - (samples[j].w / maxW) * plotHeight
-                  if (j === 0) ctx.moveTo(x, y)
+                  var t = samples[j] ? samples[j].t : NaN
+                  var w = samples[j] ? samples[j].w : NaN
+                  if (!isFinite(t) || !isFinite(w)) continue
+                  var x = ((t - minT) / spanT) * width
+                  var cw = Math.max(0, w)
+                  var y = topInset + plotHeight - (Math.min(cw, maxW) / maxW) * plotHeight
+                  if (!isFinite(x) || !isFinite(y)) continue
+                  if (!started) { ctx.moveTo(x, y); started = true }
                   else ctx.lineTo(x, y)
                 }
-                ctx.stroke()
+                if (started) ctx.stroke()
               }
 
               Connections {
@@ -816,9 +1028,9 @@ Panel {
                 return parts.join(" · ")
               }
               visible: text !== ""
-              color: root.bar.foreground
+              color: root.fg
               opacity: 0.6
-              font.family: root.bar.fontFamily
+              font.family: root.ff
               font.pixelSize: Style.font.bodySmall
               elide: Text.ElideRight
               width: parent.width
@@ -836,23 +1048,23 @@ Panel {
     width: parent.width
     spacing: Style.space(8)
 
-    InfoLabel { text: label }
-    Item { width: Math.max(0, parent.width - parent.children[0].implicitWidth - parent.children[2].implicitWidth - parent.spacing * 2); height: 1 }
-    InfoValue { text: value }
+    InfoLabel { id: pairLabel; text: label }
+    Item { width: Math.max(0, parent.width - pairLabel.implicitWidth - pairValue.implicitWidth - parent.spacing * 2); height: 1 }
+    InfoValue { id: pairValue; text: value }
   }
 
   component InfoLabel: Text {
     textFormat: Text.PlainText
-    color: root.bar.foreground
+    color: root.fg
     opacity: 0.6
-    font.family: root.bar.fontFamily
+    font.family: root.ff
     font.pixelSize: Style.font.bodySmall
   }
 
   component InfoValue: Text {
     textFormat: Text.PlainText
-    color: root.bar.foreground
-    font.family: root.bar.fontFamily
+    color: root.fg
+    font.family: root.ff
     font.pixelSize: Style.font.bodySmall
   }
 }

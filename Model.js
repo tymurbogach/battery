@@ -11,25 +11,29 @@ function selectProfileIndex(index, delta, profiles) {
 
 function parseKeyValue(raw) {
   var next = {}
-  var lines = String(raw || "").split("\n")
+  var lines = String(raw == null ? "" : raw).split("\n")
   for (var i = 0; i < lines.length; i++) {
     var idx = lines[i].indexOf("\t")
     if (idx <= 0) continue
-    next[lines[i].substring(0, idx)] = lines[i].substring(idx + 1).trim()
+    var key = lines[i].substring(0, idx).trim()
+    if (!key) continue
+    next[key] = lines[i].substring(idx + 1).trim()
   }
   return next
 }
 
 function parseProfiles(raw, previousIndex) {
-  var lines = String(raw || "").split("\n")
+  var lines = String(raw == null ? "" : raw).split("\n")
   var list = []
   var active = ""
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i].trim()
     if (!line) continue
     var parts = line.split("\t")
-    list.push(parts[0])
-    if (parts[1] === "1") active = parts[0]
+    var name = (parts[0] || "").trim()
+    if (!name) continue
+    if (list.indexOf(name) < 0) list.push(name)
+    if (parts.length > 1 && parts[1].trim() === "1" && !active) active = name
   }
   return {
     profiles: list,
@@ -45,22 +49,37 @@ function profileIcon(name) {
   return "󰂄"
 }
 
+function finiteFraction(value) {
+  var n = Number(value)
+  if (!isFinite(n)) return null
+  if (n > 1 && n <= 100) n = n / 100
+  if (n < 0 || n > 1) return null
+  return n
+}
+
 function batteryFraction(device) {
-  return device && device.isPresent ? Math.max(0, Math.min(1, device.percentage)) : 0
+  if (!(device && device.isPresent)) return 0
+  var f = finiteFraction(device.percentage)
+  return f === null ? 0 : Math.max(0, Math.min(1, f))
 }
 
 function chargeThresholdActive(device, onBattery, states) {
   var d = device || {}
   var s = states || {}
   if (!(d && d.isPresent && !onBattery)) return false
-
-  var fraction = batteryFraction(d)
   if (d.state === s.Discharging) return false
+
+  var fraction = finiteFraction(d.percentage)
+  if (fraction === null) return false
   if (d.state === s.PendingCharge) return true
   if (d.state === s.FullyCharged && fraction < 0.99) return true
   if (d.state !== s.Charging || fraction >= 0.99) return false
 
-  return Number(d.changeRate || 0) <= 0.2 || Number(d.timeToFull || 0) >= 8 * 60 * 60
+  var rate = Number(d.changeRate)
+  var ttf = Number(d.timeToFull)
+  if (!isFinite(rate)) return false
+  if (rate > 0.2 && !(isFinite(ttf) && ttf >= 8 * 60 * 60)) return false
+  return true
 }
 
 function batteryIcon(device, onBattery, states) {
@@ -69,7 +88,9 @@ function batteryIcon(device, onBattery, states) {
 
   var chargingIcons = ["󰢜", "󰂆", "󰂇", "󰂈", "󰢝", "󰂉", "󰢞", "󰂊", "󰂋", "󰂅"]
   var defaultIcons = ["󰁺", "󰁻", "󰁼", "󰁽", "󰁾", "󰁿", "󰂀", "󰂁", "󰂂", "󰁹"]
-  var index = Math.max(0, Math.min(9, Math.floor(d.percentage * 10)))
+  var fraction = finiteFraction(d.percentage)
+  if (fraction === null) return "󰂄"
+  var index = Math.max(0, Math.min(9, Math.floor(fraction * 10)))
   var threshold = chargeThresholdActive(d, onBattery, states)
 
   if (threshold) return defaultIcons[index]
@@ -82,35 +103,65 @@ function modeLabel(device, onBattery, states) {
   var d = device || {}
   if (!d.isPresent) return ""
 
-  var percentage = d.isPresent ? d.percentage : 0
   if (chargeThresholdActive(d, onBattery, states)) return "Threshold"
   if (onBattery) return "On battery"
-  if (!onBattery && percentage >= 1) return "Fully charged"
+  var fraction = finiteFraction(d.percentage)
+  if (fraction === null) return "Unknown"
+  if (!onBattery && fraction >= 1) return "Fully charged"
   return "Charging"
 }
 
 // ---- Charge-threshold toggle. `gdbus call` prints a boolean property
 // read as "(<true>,)" / "(<false>,)".
 function parseGdbusBoolean(raw) {
-  var text = String(raw || "")
-  if (text.indexOf("true") !== -1) return true
-  if (text.indexOf("false") !== -1) return false
+  var text = String(raw == null ? "" : raw)
+  var m = text.match(/\(\s*<\s*(true|false)\s*>\s*,?\s*\)/)
+  if (m) return m[1] === "true"
   return null
 }
 
+// Resolves the UPower battery object path from `upower -e` output.
+// Prefers battery_BAT0, then any battery_BAT*, then first battery_*.
+// Skips HID++ and line_power devices. Returns "" when none matches.
+function parseBatteryDbusPath(raw) {
+  var lines = String(raw == null ? "" : raw).split("\n")
+  var fallback = ""
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim()
+    if (!line) continue
+    if (line.indexOf("/org/freedesktop/UPower/devices/battery_BAT0") >= 0) return line
+    if (!fallback && /battery_BAT/i.test(line)) fallback = line
+  }
+  if (fallback) return fallback
+  for (var j = 0; j < lines.length; j++) {
+    var other = lines[j].trim()
+    if (/\/battery_[A-Za-z0-9_]+$/.test(other) && other.indexOf("hidpp") === -1) return other
+  }
+  return ""
+}
+
 // ---- Watts drain history: a short in-memory sparkline, not a database.
+// Accepts "15W", "15.5 W", 0. Rejects NaN and infinities.
 function parseWattsRate(rateText) {
-  var value = parseFloat(String(rateText || ""))
+  if (rateText === null || rateText === undefined) return null
+  var value = parseFloat(String(rateText).trim())
   return isFinite(value) ? value : null
 }
 
 // Appends one sample and drops anything older than maxAgeSeconds -- a
-// fixed-size rolling window instead of an ever-growing array.
+// bounded rolling window instead of an ever-growing array. Resets on
+// backward clock jumps so x stays monotonic. Caps count to bound memory.
 function appendDrainSample(samples, watts, now, maxAgeSeconds) {
-  var next = (samples || []).slice()
-  if (watts !== null) next.push({ t: now, w: watts })
+  var next = Array.isArray(samples) ? samples.slice() : []
+  if (!isFinite(now)) return next
+  if (next.length > 0 && now < next[next.length - 1].t) next = []
+  if (watts !== null && watts !== undefined && isFinite(watts)) {
+    next.push({ t: now, w: Number(watts) })
+  }
   var cutoff = now - maxAgeSeconds
   while (next.length > 0 && next[0].t < cutoff) next.shift()
+  var maxSamples = 200
+  if (next.length > maxSamples) next = next.slice(next.length - maxSamples)
   return next
 }
 
@@ -150,11 +201,13 @@ if (typeof module !== "undefined") {
     parseKeyValue: parseKeyValue,
     parseProfiles: parseProfiles,
     profileIcon: profileIcon,
+    finiteFraction: finiteFraction,
     batteryFraction: batteryFraction,
     chargeThresholdActive: chargeThresholdActive,
     batteryIcon: batteryIcon,
     modeLabel: modeLabel,
     parseGdbusBoolean: parseGdbusBoolean,
+    parseBatteryDbusPath: parseBatteryDbusPath,
     parseWattsRate: parseWattsRate,
     appendDrainSample: appendDrainSample,
     defaultHzForProfile: defaultHzForProfile,

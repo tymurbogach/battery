@@ -16,10 +16,10 @@ Base from `omarchy.power`, unchanged:
 
 New in this plugin:
 
-- **Manual profile picker per source** — click a pill to set the profile for the current source (powerON = AC, powerOFF = battery) via `omarchy-powerprofiles-set`. The choice persists in the native per-source state file; `hypr-profile-auto` restores it automatically on plug/unplug.
-- **Refresh status (read-only)** — shows the focused monitor and its current refresh rate. Switching (120Hz AC, 60Hz battery) is owned by `hypr-refresh-auto`, not by this widget.
-- **Charge-threshold toggle** — on/off through UPower's own `EnableChargeThreshold` DBus method. Only shown when the battery reports a configured threshold (e.g. 75-80%). Percentages stay as firmware reports them.
-- **Power draw plus health** — 10-minute in-memory sparkline with live watts, plus a health line (cycles, limit, size). No database, gone on shell restart.
+- **Manual profile picker per source** — click a pill to set the profile for the current source (powerON = AC, powerOFF = battery) via `omarchy-powerprofiles-set`. The choice persists in the native per-source state file. Buttons disable while a switch runs, and failures show in the panel banner.
+- **Per-profile 120Hz toggle** — one on/off toggle saved independently per power profile (defaults saver 60, balanced/performance 120). The toggle writes `~/.local/state/omarchy/toggles/hypr/refresh-override-hz`, which the optional `hypr-refresh-auto` daemon enforces. The subtitle shows the live rate read-only via `hyprctl monitors -j`.
+- **Charge-threshold toggle** — on/off through UPower's own `EnableChargeThreshold` DBus method. Only shown when the battery reports a configured threshold (e.g. 75-80%). Percentages stay as firmware reports them. Polkit denials show in the row instead of failing silently.
+- **Power draw plus health** — 10-minute in-memory sparkline (discharge only, `0W` valid, max 200 samples), plus a health line (cycles, limit, size). No database, gone on shell restart.
 
 No Quick Dim, no Travel Mode, no GPU status, no low-battery notifier (the system service already warns at 10%). Those are deliberate omissions.
 
@@ -45,33 +45,48 @@ omarchy bar move cyberdyne.battery --section right
 
 - Click the bar pill to open the panel, click a profile pill to set it for the current source.
 - The header shows which source is active (`POWER · ON AC` or `POWER · ON BATTERY`).
-- The refresh line is informational only; `hypr-refresh-auto` owns switching.
+- Flip the 120Hz toggle to set the rate for the active profile. The daemon applies it within seconds.
 - Flip Charge threshold only when the row is visible (hardware must report a threshold).
-- The bottom graph needs the panel open for a few samples before it draws.
+- The bottom graph needs the panel open for a few samples before it draws. It records only while discharging.
+- If data goes stale, the panel shows a `STALE` banner with the last error instead of trusting old values.
+
+## Configure
+
+Settings live inline on the bar entry (via `updateEntryInline`):
+
+- `showPercentage` (default `false`) — right-click the bar pill toggles it.
+- `hz_power-saver` (default `60`), `hz_balanced` (default `120`), `hz_performance` (default `120`) — per-profile rate.
+
+Legacy keys `refreshAc` / `refreshBatt` (v0.1.0) are ignored since v0.2.0. They stay orphaned in `shell.json` and cause no error. Delete them by hand if you want a clean entry.
 
 ## How it works
 
-- **Profiles**: `omarchy-powerprofiles-set <ac|battery> <profile>` on manual pick (writes the native state file). `hypr-profile-auto` polls `omarchy-power-present` (sysfs) every 5s and restores the remembered profile on cable change, logging to `~/.local/state/omarchy/powerprofiles/ac-watch.log`.
-- **Refresh**: the toggle stores 60/120 per profile in settings and writes `~/.local/state/omarchy/toggles/hypr/refresh-override-hz`, which `hypr-refresh-auto` enforces (overriding its AC=120/battery=60 source logic). Live rate shown read-only via `hyprctl monitors -j`.
-- **Threshold**: `gdbus call` against `org.freedesktop.UPower` for `ChargeThresholdEnabled` read and `EnableChargeThreshold` write, targeting `upower -e | grep BAT`.
-- **Draw history**: reuses the `rate` field from every `omarchy-battery-status --shell` sample in a rolling 600s window.
+- **Profiles**: `omarchy-powerprofiles-set <ac|battery> <profile>` on manual pick (writes the native state file). The optional `hypr-profile-auto` daemon (`~/.local/bin`, not bundled) polls `omarchy-power-present` (sysfs) every 5s and restores the remembered profile on cable change, logging to `~/.local/state/omarchy/powerprofiles/ac-watch.log`. Without it, picks still persist per source but nothing auto-switches on plug/unplug.
+- **Refresh**: the toggle stores 60/120 per profile in settings and writes `~/.local/state/omarchy/toggles/hypr/refresh-override-hz`, which the optional `hypr-refresh-auto` daemon (not bundled) enforces (overriding its AC=120/battery=60 source logic). Without it, the toggle still saves the setting but nothing applies it. Live rate shown read-only via `hyprctl monitors -j` (30s poll).
+- **Threshold**: two plain-argv steps, no shell interpolation. First `upower -e` resolves the battery object path (prefers `battery_BAT0`, skips HID++ and line_power). Then `gdbus call` against `org.freedesktop.UPower` for `ChargeThresholdEnabled` read and `EnableChargeThreshold` write with that path.
+- **Draw history**: reuses the `rate` field from every `omarchy-battery-status --shell` sample while discharging, in a rolling 600s window capped at 200 samples.
+- **Polling**: CLI text fields refresh every 15s while the panel is open. A 10s watchdog kills hung queries so the next tick recovers. After 2 consecutive failures the panel marks data `STALE`.
 - **Settings**: `showPercentage`, `hz_power-saver`, `hz_balanced`, `hz_performance`. Stored inline on the bar entry via `updateEntryInline`.
 
-## External dependencies
+## Requirements
 
-`omarchy-battery-status`, `omarchy-powerprofiles-list`, `omarchy-powerprofiles-set`, `omarchy-system-stats`, `hyprctl`, `gdbus`, `upower`. All standard on Omarchy. No network, no elevated privileges beyond UPower polkit for the threshold toggle.
+Required (standard on Omarchy): `omarchy-battery-status`, `omarchy-powerprofiles-list`, `omarchy-powerprofiles-set`, `omarchy-system-stats`, `hyprctl`, `gdbus`, `upower`, `bash` (only for the Hz override writer: `mkdir -p` plus `printf`). No network. No elevated privileges beyond the UPower polkit policy for the threshold toggle. If polkit denies the toggle, the panel shows the denial.
+
+Optional (not bundled, local daemons): `hypr-profile-auto` and `hypr-refresh-auto` in `~/.local/bin`. The widget works without them, but auto-switch on plug/unplug and Hz enforcement stay inert.
 
 ## Known issues
 
 - **Stale UPower AC record**: on this hardware UPower's `line_power_AC` stops updating (seen `online: yes` 70min stale while sysfs said unplugged), so `OnBattery` never flips and UPower-based icons/mode labels can claim "Charging" while draining. Profile switching deliberately uses sysfs (`hypr-profile-auto`) instead. A one-time `sudo systemctl restart upower` re-reads sysfs; if it recurs, it is an upstream UPower/udev event-delivery issue.
 
-## Uninstalling
+## Remove
 
 ```
 omarchy plugin remove cyberdyne.battery
 ```
 
-Re-add `omarchy.power` to the bar if you want the stock widget back. Removal leaves the native `~/.local/state/omarchy/powerprofiles/` files untouched (they belong to Omarchy, not to this plugin). Also delete the refresh override if you no longer want per-profile rates:
+Re-add `omarchy.power` to the bar if you want the stock widget back. Removal leaves the native `~/.local/state/omarchy/powerprofiles/` files untouched (they belong to Omarchy, not to this plugin).
+
+Plugin-owned state: `~/.local/state/omarchy/toggles/hypr/refresh-override-hz` (one file, the per-profile Hz override). Retention: kept across reinstalls so your per-profile rates survive. Removal: the plugin never deletes it silently. Confirm, then run once if you no longer want per-profile rates:
 
 ```
 rm -f ~/.local/state/omarchy/toggles/hypr/refresh-override-hz
