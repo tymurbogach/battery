@@ -2,6 +2,16 @@
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.4.0 — Daemon owns auto-switch
+
+### Added
+
+- `hypr-profile-auto` (`~/.local/bin`, sysfs poll every 5s, switch log): verified end-to-end against a fake power supply (AC/battery flips switch profiles correctly).
+
+### Removed
+
+- QML AC watch and cable status line (a QML Timer/Process poll proved unobservable and unreliable in this shell; the daemon replaces it with the same pattern as the proven `hypr-refresh-auto`).
+
 ## v0.3.0 — Sysfs AC watch
 
 ### Added

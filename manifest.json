@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "cyberdyne.battery",
   "name": "Battery",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": "cyberdyne",
   "license": "MIT",
-  "description": "Battery with independent AC/battery profiles, per-source refresh rate, charge-threshold toggle, and power-draw history.",
+  "description": "Battery with manual per-source profiles, charge-threshold toggle, and power-draw history.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Battery",
-    "description": "AC/battery profiles plus refresh rate, threshold toggle, and drain history",
+    "description": "Manual profiles plus threshold toggle and drain history",
     "category": "System",
     "allowMultiple": false
   }
