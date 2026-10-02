@@ -49,8 +49,14 @@ Panel {
 
   // Guarded bar theme access. bar is null during startup/recreation;
   // content must not throw TypeError in that window.
-  readonly property color fg: root.bar ? root.fg : Color.foreground
-  readonly property string ff: root.bar ? root.ff : Style.font.family
+  readonly property color fg: root.bar ? root.bar.foreground : Color.foreground
+  readonly property string ff: root.bar ? root.bar.fontFamily : Style.font.family
+
+  // Sysfs truth for the AC/battery source. UPower's OnBattery can freeze
+  // (stale line_power_AC); omarchy-power-present reads sysfs directly.
+  // "ac" | "battery" | "" (unknown until the first probe lands).
+  property string acSource: ""
+  readonly property bool sourceConflict: Model.sourceConflict(root.acSource, root.discharging)
 
   readonly property bool batteryPresent: {
     var device = UPower.displayDevice
@@ -120,12 +126,14 @@ Panel {
   }
 
   // Source helpers: "ac" = powerON (plugged), "battery" = powerOFF.
+  // Prefer the sysfs probe when known; UPower OnBattery can freeze.
   function sourceKey() {
-    return root.discharging ? "battery" : "ac"
+    return Model.effectiveSource(root.acSource, root.discharging ? "battery" : "ac")
   }
 
   function sourceLabel() {
-    return root.discharging ? "ON BATTERY" : "ON AC"
+    var key = root.sourceKey()
+    return key === "battery" ? "ON BATTERY" : "ON AC"
   }
 
   function updateSettings(patch) {
@@ -140,7 +148,7 @@ Panel {
       var f = root.batteryFraction
       pctText = isFinite(f) ? Math.round(f * 100) + "%" : "—"
     }
-    var src = root.discharging ? "Battery" : "AC"
+    var src = root.sourceKey() === "battery" ? "Battery" : "AC"
     var extra = root.batteryInfo.time ? " · " + root.batteryInfo.time : ""
     var stale = root.dataStale ? " (stale)" : ""
     return src + " · " + pctText + extra + stale
@@ -384,6 +392,31 @@ Panel {
     root.drainSamples = Model.appendDrainSample(root.drainSamples, watts, Date.now() / 1000, 600)
   }
 
+  // ---- Instant AC/battery reaction. Three layers, cheapest first:
+  // 1. UPower onBatteryChanged signal (instant when UPower is healthy).
+  // 2. Kernel uevents via udevadm monitor while open (immune to stale UPower).
+  // 3. The 15s poll stays as safety net for missed signals.
+  // Every trigger runs the one-shot sysfs probe; sysfs wins disagreements.
+  function probeAcSource() {
+    if (!acProbeProc.running) acProbeProc.running = true
+  }
+
+  function handleAcProbe(code) {
+    var src = Model.probeSourceFromExit(code)
+    if (src !== root.acSource) {
+      root.acSource = src
+      // Source flipped: refresh text fields now instead of next poll tick.
+      root.refreshFailCount = 0
+      root.refresh()
+      if (!monitorReadProc.running) monitorReadProc.running = true
+    }
+  }
+
+  function handleUdevLine(line) {
+    if (!line || String(line).trim() === "") return
+    udevDebounce.restart()
+  }
+
   IpcHandler {
     target: "cyberdyne.battery"
 
@@ -403,14 +436,33 @@ Panel {
       }
 
       refresh()
+      root.probeAcSource()
       if (!monitorReadProc.running) monitorReadProc.running = true
+      if (!udevMonProc.running) udevMonProc.running = true
       var idx = profiles.indexOf(activeProfile)
       profileIndex = idx >= 0 ? idx : 0
       cursorActive = false
+    } else {
+      // Panel closed: stop the uevent watch. The bar pill icon stays
+      // reactive through the UPower binding at zero cost.
+      udevMonProc.running = false
+      udevMonRestart.stop()
+      udevDebounce.stop()
     }
   }
 
   onBatteryPresentChanged: if (!batteryPresent) close()
+
+  // Same signal the first-party omarchy.battery service uses.
+  Connections {
+    target: UPower
+    function onOnBatteryChanged() {
+      root.probeAcSource()
+      root.refreshFailCount = 0
+      root.refresh()
+      if (!monitorReadProc.running) monitorReadProc.running = true
+    }
+  }
 
   visible: batteryPresent
   implicitWidth: batteryPresent ? button.implicitWidth : 0
@@ -471,6 +523,41 @@ Panel {
       onStreamFinished: if (text && String(text).trim() !== "") root.chargeThresholdError = String(text).trim().slice(0, 160)
     }
     onExited: function(code) { if (code !== 0) root.chargeThresholdError = "upower -e failed (exit " + code + ")" }
+  }
+
+  // One-shot sysfs truth. omarchy-power-present exits 0 on AC, 1 on
+  // battery. No output to parse, no shell involved.
+  Process {
+    id: acProbeProc
+    command: ["omarchy-power-present"]
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: function(code) { root.handleAcProbe(code) }
+  }
+
+  // Kernel uevents for power_supply while the panel is open. A plug or
+  // unplug wakes this instantly even when UPower records go stale.
+  // Long-running by design: the watchdog must never kill it.
+  Process {
+    id: udevMonProc
+    command: ["udevadm", "monitor", "--udev", "--subsystem-match=power_supply"]
+    stdout: SplitParser { onRead: function(line) { root.handleUdevLine(line) } }
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: udevMonRestart.restart()
+  }
+
+  Timer {
+    id: udevMonRestart
+    interval: 2000
+    onTriggered: if (root.opened && !udevMonProc.running) udevMonProc.running = true
+  }
+
+  // Uevents arrive in bursts (one per supply plus properties). Probe once
+  // the burst settles instead of once per line.
+  Timer {
+    id: udevDebounce
+    interval: 500
+    onTriggered: root.probeAcSource()
   }
 
   Process {
@@ -544,6 +631,7 @@ Panel {
 
   // A hung CLI would freeze refresh forever since a running Process
   // cannot restart. Kill stragglers so the next tick recovers.
+  // udevMonProc is long-running by design and stays out of this list.
   Timer {
     id: stallTimer
     interval: 10000
@@ -553,6 +641,7 @@ Panel {
       if (profilesProc.running) { profilesProc.running = false; killed = true }
       if (systemProc.running) { systemProc.running = false; killed = true }
       if (monitorReadProc.running) { monitorReadProc.running = false; killed = true }
+      if (acProbeProc.running) { acProbeProc.running = false; killed = true }
       if (killed) root.noteRefreshFailure("timeout, retrying")
     }
   }
@@ -757,10 +846,13 @@ Panel {
 
         // ---------- Status banner: stale data or visible errors ----------
         Text {
-          visible: root.dataStale || root.lastError !== ""
+          visible: root.dataStale || root.lastError !== "" || root.sourceConflict
           width: parent.width
           textFormat: Text.PlainText
-          text: root.dataStale ? ("STALE · " + (root.lastError || "retrying")) : root.lastError
+          text: {
+            if (root.sourceConflict) return "SYSFS ▸ " + root.sourceLabel() + " (UPower stale)"
+            return root.dataStale ? ("STALE · " + (root.lastError || "retrying")) : root.lastError
+          }
           color: root.fg
           opacity: 0.7
           font.family: root.ff

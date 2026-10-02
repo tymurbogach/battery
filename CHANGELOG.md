@@ -2,6 +2,17 @@
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.7.0 — Instant AC/battery reaction
+
+### Added
+
+- Instant source reaction in three layers: UPower `onBatteryChanged` signal, kernel uevents via `udevadm monitor --subsystem-match=power_supply` (panel-open only, 500ms debounce), and the 15s poll as safety net.
+- Sysfs arbitration: every trigger runs one-shot `omarchy-power-present`. The probe wins disagreements, profile writes use the effective source, and the banner shows `SYSFS ▸ … (UPower stale)` on conflict.
+
+### Fixed
+
+- `fg` / `ff` self-reference binding (bar null guard pointed at itself). All themed colors now resolve correctly.
+
 ## v0.6.0 — Silent-failure hardening
 
 ### Fixed

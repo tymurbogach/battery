@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "cyberdyne.battery",
   "name": "Battery",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "author": "cyberdyne",
   "license": "MIT",
   "description": "Battery with manual per-source profiles, charge-threshold toggle, and power-draw history.",

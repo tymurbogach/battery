@@ -65,7 +65,7 @@ Legacy keys `refreshAc` / `refreshBatt` (v0.1.0) are ignored since v0.2.0. They 
 - **Refresh**: the toggle stores 60/120 per profile in settings and writes `~/.local/state/omarchy/toggles/hypr/refresh-override-hz`, which the optional `hypr-refresh-auto` daemon (not bundled) enforces (overriding its AC=120/battery=60 source logic). Without it, the toggle still saves the setting but nothing applies it. Live rate shown read-only via `hyprctl monitors -j` (30s poll).
 - **Threshold**: two plain-argv steps, no shell interpolation. First `upower -e` resolves the battery object path (prefers `battery_BAT0`, skips HID++ and line_power). Then `gdbus call` against `org.freedesktop.UPower` for `ChargeThresholdEnabled` read and `EnableChargeThreshold` write with that path.
 - **Draw history**: reuses the `rate` field from every `omarchy-battery-status --shell` sample while discharging, in a rolling 600s window capped at 200 samples.
-- **Polling**: CLI text fields refresh every 15s while the panel is open. A 10s watchdog kills hung queries so the next tick recovers. After 2 consecutive failures the panel marks data `STALE`.
+- **Polling**: CLI text fields refresh every 15s while the panel is open. Plug/unplug reacts instantly through the UPower signal plus kernel uevents (`udevadm monitor`, panel-open only). Every trigger runs one-shot `omarchy-power-present`; sysfs wins disagreements. A 10s watchdog kills hung queries so the next tick recovers. After 2 consecutive failures the panel marks data `STALE`.
 - **Settings**: `showPercentage`, `hz_power-saver`, `hz_balanced`, `hz_performance`. Stored inline on the bar entry via `updateEntryInline`.
 
 ## Requirements

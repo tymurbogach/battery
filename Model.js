@@ -194,6 +194,25 @@ function prettyProfile(profile) {
   return name === "" ? "…" : (name.charAt(0).toUpperCase() + name.slice(1))
 }
 
+// ---- AC/battery source arbitration. UPower OnBattery can freeze on stale
+// line_power_AC records; omarchy-power-present (sysfs) is the tiebreaker.
+// Probe maps its exit code: 0 = AC plugged, anything else = on battery.
+function probeSourceFromExit(code) {
+  return Number(code) === 0 ? "ac" : "battery"
+}
+
+// Prefers the sysfs probe when known, falls back to the UPower derivation.
+function effectiveSource(probed, fallback) {
+  if (probed === "ac" || probed === "battery") return probed
+  return fallback
+}
+
+// True when the probe disagrees with UPower: sysfs wins, show it.
+function sourceConflict(probed, discharging) {
+  if (probed !== "ac" && probed !== "battery") return false
+  return (probed === "battery") !== !!discharging
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     clampIndex: clampIndex,
@@ -214,6 +233,9 @@ if (typeof module !== "undefined") {
     hzSettingKey: hzSettingKey,
     normalizeHz: normalizeHz,
     hzForProfile: hzForProfile,
-    prettyProfile: prettyProfile
+    prettyProfile: prettyProfile,
+    probeSourceFromExit: probeSourceFromExit,
+    effectiveSource: effectiveSource,
+    sourceConflict: sourceConflict
   }
 }
