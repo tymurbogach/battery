@@ -2,6 +2,13 @@
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.3.0 — Sysfs AC watch
+
+### Added
+
+- Fallback auto-switch: 10s sysfs poll (`omarchy-power-present`) running the native per-source restore on cable change. Same command the system service runs, idempotent, no mirror. Works around stale UPower `OnBattery` (observed: `line_power_AC` 70min stale, `online:yes`, while sysfs said unplugged).
+- Cable status line in the panel (`Cable: plugged/unplugged (sysfs)`).
+
 ## v0.2.0 — One writer per subsystem
 
 ### Removed

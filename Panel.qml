@@ -25,14 +25,20 @@ Panel {
   // icon-sized fraction of the slot the fallback assumes.
   readonly property real openPanelIndicatorWidth: showPercentage && !button.vertical ? button.glyphPaintedWidth : 0
 
-  // ---- Ownership note. Power-profile auto-switch on plug/unplug belongs
-  // to the first-party omarchy.battery service; display refresh belongs to
-  // hypr-refresh-auto (~/.local/bin). This widget never writes either one --
-  // it only picks profiles manually, toggles the charge threshold, and shows
-  // read-only status. That keeps exactly one writer per subsystem.
+  // ---- Ownership note. Profile auto-switch on plug/unplug belongs to the
+  // first-party omarchy.battery service, display refresh to hypr-refresh-auto.
+  // This widget only picks profiles manually -- plus a sysfs AC watch below
+  // as a fallback path, because UPower's OnBattery signal goes stale on this
+  // machine (see acPresent). It never writes monitor configuration.
   property bool chargeThresholdEnabled: false
   property var drainSamples: []
   property var currentMonitor: null
+  // AC state via sysfs (omarchy-power-present, exit 0 = plugged), not UPower.
+  // Observed: UPower's line_power_AC record 70min stale (online:yes) while
+  // sysfs said online=0, so OnBattery never flipped and nothing UPower-based
+  // could switch. Same signal hypr-refresh-auto already trusts. null = yet
+  // unknown (startup, before the first poll answers).
+  property var acPresent: null
 
   readonly property bool batteryPresent: {
     var device = UPower.displayDevice
@@ -127,6 +133,34 @@ Panel {
     if (!root.currentMonitor) return "Detecting display…"
     var hz = Math.round(Number(root.currentMonitor.refreshRate || 0))
     return (root.currentMonitor.name || "Display") + " · now " + (hz > 0 ? hz + "Hz" : "—")
+  }
+
+  readonly property string cableStatusText: {
+    if (root.acPresent === null || root.acPresent === undefined) return "Cable: checking…"
+    return root.acPresent ? "Cable: plugged (sysfs)" : "Cable: unplugged (sysfs)"
+  }
+
+  // Fallback auto-switch on the sysfs signal. Runs the same native restore
+  // command the omarchy.battery service runs, so when both fire they converge
+  // on the same profile (idempotent). No settings mirror, no explicit
+  // profile -- never clobbers a choice made via menu or CLI.
+  function applyAcProfile(present) {
+    if (!batteryPresent) return
+    if (!autoProfileProc.running) {
+      autoProfileProc.command = ["omarchy-powerprofiles-set", present ? "ac" : "battery"]
+      autoProfileProc.running = true
+    }
+  }
+
+  function handleAcCheck(exitCode) {
+    var present = exitCode === 0
+    if (root.acPresent === null || root.acPresent === undefined) {
+      root.acPresent = present
+      return
+    }
+    if (present === root.acPresent) return
+    root.acPresent = present
+    root.applyAcProfile(present)
   }
 
   // Cute agent-flavored phrases shown in the hero status line, rotated on a
@@ -333,6 +367,28 @@ Panel {
     id: monitorReadProc
     command: ["hyprctl", "monitors", "-j"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.handleMonitorsOutput(text) }
+  }
+
+  // Sysfs AC poll: one trivial exit-code check per interval, always on.
+  // 10s is plenty -- hypr-refresh-auto polls the same signal every 5s.
+  Timer {
+    id: acPollTimer
+    interval: 10000
+    running: true
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: if (!acCheckProc.running) acCheckProc.running = true
+  }
+
+  Process {
+    id: acCheckProc
+    command: ["omarchy-power-present"]
+    onExited: function(exitCode) { root.handleAcCheck(exitCode) }
+  }
+
+  Process {
+    id: autoProfileProc
+    onExited: root.refresh()
   }
 
   Component.onCompleted: {
@@ -616,7 +672,17 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            text: "Auto-switch on plug/unplug is handled by the system service"
+            text: root.cableStatusText
+            color: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            elide: Text.ElideRight
+            width: parent.width
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            text: "Auto-switch: system service + sysfs watch"
             color: root.bar.foreground
             opacity: 0.6
             font.family: root.bar.fontFamily

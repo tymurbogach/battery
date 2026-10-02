@@ -2,7 +2,7 @@
 
 Independent battery bar widget for [Omarchy](https://omarchy.org/), cloned from the built-in `omarchy.power` and extended with a charge-threshold toggle and a power-draw history.
 
-One writer per subsystem: profile auto-switch belongs to the first-party `omarchy.battery` service, display refresh belongs to `hypr-refresh-auto`. This widget never writes either one.
+One writer per subsystem: profile auto-switch belongs to the first-party `omarchy.battery` service, display refresh belongs to `hypr-refresh-auto`. This widget only adds a sysfs AC watch as a fallback switch path, because UPower's `OnBattery` signal goes stale on some hardware (see Known issues).
 
 ## Features
 
@@ -17,6 +17,7 @@ Base from `omarchy.power`, unchanged:
 New in this plugin:
 
 - **Manual profile picker per source** — click a pill to set the profile for the current source (powerON = AC, powerOFF = battery) via `omarchy-powerprofiles-set`. The choice persists in the native per-source state file and the `omarchy.battery` service restores it automatically on plug/unplug.
+- **Sysfs AC watch (fallback auto-switch)** — polls `omarchy-power-present` every 10s and runs the same native restore command the system service runs when the cable state changes. Same target profile, idempotent, no settings mirror. The panel shows the cable state as seen by sysfs.
 - **Refresh status (read-only)** — shows the focused monitor and its current refresh rate. Switching (120Hz AC, 60Hz battery) is owned by `hypr-refresh-auto`, not by this widget.
 - **Charge-threshold toggle** — on/off through UPower's own `EnableChargeThreshold` DBus method. Only shown when the battery reports a configured threshold (e.g. 75-80%). Percentages stay as firmware reports them.
 - **Power draw plus health** — 10-minute in-memory sparkline with live watts, plus a health line (cycles, limit, size). No database, gone on shell restart.
@@ -51,7 +52,7 @@ omarchy bar move cyberdyne.battery --section right
 
 ## How it works
 
-- **Profiles**: `omarchy-powerprofiles-set <ac|battery> <profile>` on manual pick (writes the native state file). The first-party `omarchy.battery` service restores the remembered profile on `UPower.onBattery` change.
+- **Profiles**: `omarchy-powerprofiles-set <ac|battery> <profile>` on manual pick (writes the native state file). The first-party `omarchy.battery` service restores the remembered profile on `UPower.onBattery` change; this widget repeats the same native restore on sysfs cable change as a fallback.
 - **Refresh**: read-only via `hyprctl monitors -j` (focused monitor first). Never written by this widget.
 - **Threshold**: `gdbus call` against `org.freedesktop.UPower` for `ChargeThresholdEnabled` read and `EnableChargeThreshold` write, targeting `upower -e | grep BAT`.
 - **Draw history**: reuses the `rate` field from every `omarchy-battery-status --shell` sample in a rolling 600s window.
@@ -59,7 +60,11 @@ omarchy bar move cyberdyne.battery --section right
 
 ## External dependencies
 
-`omarchy-battery-status`, `omarchy-powerprofiles-list`, `omarchy-powerprofiles-set`, `omarchy-system-stats`, `hyprctl`, `gdbus`, `upower`. All standard on Omarchy. No network, no elevated privileges beyond UPower polkit for the threshold toggle.
+`omarchy-battery-status`, `omarchy-powerprofiles-list`, `omarchy-powerprofiles-set`, `omarchy-system-stats`, `omarchy-power-present`, `hyprctl`, `gdbus`, `upower`. All standard on Omarchy. No network, no elevated privileges beyond UPower polkit for the threshold toggle.
+
+## Known issues
+
+- **Stale UPower AC record**: on some hardware UPower's `line_power_AC` stops updating (`online: yes`, tens of minutes old) while sysfs already reports the unplug, so `OnBattery` never flips and UPower-based icons/mode labels can claim "Charging" while draining. The profile fallback in this widget deliberately uses sysfs instead. A one-time `sudo systemctl restart upower` re-reads sysfs; if it recurs, it is an upstream UPower/udev event-delivery issue.
 
 ## Uninstalling
 
