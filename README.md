@@ -26,19 +26,20 @@ No Quick Dim, no Travel Mode, no GPU status, no low-battery notifier (the system
 ## Install
 
 ```
-omarchy plugin add ~/Projects/battery --enable
-```
-
-Or from a git remote once published:
-
-```
 omarchy plugin add https://github.com/tymurbogach/battery.git --enable
 ```
 
-Then put it on the bar (replaces `omarchy.power` or `io.github.aryan-techie.battery`):
+Then put it on the bar at the far right end (replaces `omarchy.power`):
 
 ```
-omarchy bar move cyberdyne.battery --section right
+omarchy bar move cyberdyne.battery --section right --index 99
+```
+
+Any large index lands last. To place it elsewhere, pick your own anchor instead:
+
+```
+omarchy bar move cyberdyne.battery --after omarchy.audio
+omarchy bar move cyberdyne.battery --section right --index 0
 ```
 
 ## Usage

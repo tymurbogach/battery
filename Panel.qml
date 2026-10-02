@@ -386,9 +386,11 @@ Panel {
 
   function recordDrainSample() {
     // Record draw only while discharging; while charging the rate field
-    // is charge current, not draw. Pass null otherwise so the window still
-    // prunes by age instead of freezing.
-    var watts = root.discharging ? Model.parseWattsRate(root.batteryInfo.rate) : null
+    // is charge current, not draw. Uses the effective (sysfs-arbitrated)
+    // source so a stale UPower record cannot poison the graph.
+    // Pass null otherwise so the window still prunes by age instead
+    // of freezing.
+    var watts = root.sourceKey() === "battery" ? Model.parseWattsRate(root.batteryInfo.rate) : null
     root.drainSamples = Model.appendDrainSample(root.drainSamples, watts, Date.now() / 1000, 600)
   }
 
