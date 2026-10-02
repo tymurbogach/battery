@@ -261,6 +261,7 @@ Panel {
     if (!batteryPresent) return
     var source = root.sourceKey()
     var profile = root.rememberedProfile(source)
+    console.log("[cyberdyne.battery] applySourcePreset source=" + source + " remembered=" + profile + " refresh=" + root.refreshForSource(source))
     if (profile !== "") {
       if (!autoProfileProc.running) {
         autoProfileProc.command = ["omarchy-powerprofiles-set", source, profile]
@@ -382,6 +383,7 @@ Panel {
   onBatteryPresentChanged: if (!batteryPresent) close()
 
   onDischargingChanged: {
+    console.log("[cyberdyne.battery] discharging changed to " + root.discharging + " armed=" + root.autoSwitchArmed + " present=" + batteryPresent)
     if (!root.autoSwitchArmed || !batteryPresent) return
     root.refresh()
     root.applySourcePreset()
