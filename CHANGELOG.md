@@ -8,6 +8,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Instant source reaction in three layers: UPower `onBatteryChanged` signal, kernel uevents via `udevadm monitor --subsystem-match=power_supply` (panel-open only, 500ms debounce), and the 15s poll as safety net.
 - Sysfs arbitration: every trigger runs one-shot `omarchy-power-present`. The probe wins disagreements, profile writes use the effective source, and the banner shows `SYSFS ▸ … (UPower stale)` on conflict.
+- Drain sparkline records on the effective (sysfs-arbitrated) source, so a stale UPower record cannot poison the graph.
+- Marketplace README: hook, click table, screenshots (`preview.png` plus `docs/images/`), per-key configure table, update instructions.
+- Install defaults to the far right end (`--section right --index 99`) with reposition anchors documented.
 
 ### Fixed
 
