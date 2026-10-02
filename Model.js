@@ -114,38 +114,6 @@ function appendDrainSample(samples, watts, now, maxAgeSeconds) {
   return next
 }
 
-// ---- Per-source refresh rate. Rebuilds the `hyprctl keyword monitor`
-// argument for one monitor with only the refresh rate changed, from a
-// `hyprctl monitors -j` entry -- resolution, position, and scale
-// round-trip unchanged so this can't accidentally move or resize anything.
-function monitorKeywordLine(monitorInfo, refreshRate) {
-  var m = monitorInfo || {}
-  var rate = refreshRate || m.refreshRate
-  return m.name + "," + m.width + "x" + m.height + "@" + rate
-    + "," + m.x + "x" + m.y + "," + m.scale
-}
-
-// Picks the focused monitor, falling back to the first one. Returns null
-// when the list is empty or unparseable (docked with no panel, etc.).
-function selectTargetMonitor(monitors) {
-  var list = Array.isArray(monitors) ? monitors : []
-  if (list.length === 0) return null
-  for (var i = 0; i < list.length; i++) {
-    if (list[i] && list[i].focused) return list[i]
-  }
-  return list[0]
-}
-
-// Normalizes a refresh-rate setting to one of the allowed values.
-// Returns fallback when the stored value is missing or unexpected.
-function normalizeRefresh(value, allowed, fallback) {
-  var n = Number(value)
-  for (var i = 0; i < allowed.length; i++) {
-    if (Number(allowed[i]) === n) return n
-  }
-  return fallback
-}
-
 if (typeof module !== "undefined") {
   module.exports = {
     clampIndex: clampIndex,
@@ -159,9 +127,6 @@ if (typeof module !== "undefined") {
     modeLabel: modeLabel,
     parseGdbusBoolean: parseGdbusBoolean,
     parseWattsRate: parseWattsRate,
-    appendDrainSample: appendDrainSample,
-    monitorKeywordLine: monitorKeywordLine,
-    selectTargetMonitor: selectTargetMonitor,
-    normalizeRefresh: normalizeRefresh
+    appendDrainSample: appendDrainSample
   }
 }

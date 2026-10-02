@@ -25,19 +25,14 @@ Panel {
   // icon-sized fraction of the slot the fallback assumes.
   readonly property real openPanelIndicatorWidth: showPercentage && !button.vertical ? button.glyphPaintedWidth : 0
 
-  // ---- Per-source memory (powerON = AC, powerOFF = battery). Profiles are
-  // stored natively by omarchy-powerprofiles-set under
-  // ~/.local/state/omarchy/powerprofiles/{ac,battery}; the plugin mirrors
-  // the last explicit choice per source in its own settings so the panel can
-  // show both slots without reading state files. Refresh rates live only in
-  // settings (defaults match this machine: AC 120Hz, battery 60Hz).
+  // ---- Ownership note. Power-profile auto-switch on plug/unplug belongs
+  // to the first-party omarchy.battery service; display refresh belongs to
+  // hypr-refresh-auto (~/.local/bin). This widget never writes either one --
+  // it only picks profiles manually, toggles the charge threshold, and shows
+  // read-only status. That keeps exactly one writer per subsystem.
   property bool chargeThresholdEnabled: false
   property var drainSamples: []
   property var currentMonitor: null
-  property var pendingRefreshRate: null
-  property bool autoSwitchArmed: false
-  property bool notifiedLow: false
-  property bool notifiedCritical: false
 
   readonly property bool batteryPresent: {
     var device = UPower.displayDevice
@@ -113,27 +108,6 @@ Panel {
 
   function sourceLabel() {
     return root.discharging ? "ON BATTERY" : "ON AC"
-  }
-
-  function refreshForSource(source) {
-    if (source === "battery") return Model.normalizeRefresh(setting("refreshBatt", 60), [60, 120], 60)
-    return Model.normalizeRefresh(setting("refreshAc", 120), [60, 120], 120)
-  }
-
-  function rememberedProfile(source) {
-    var key = source === "battery" ? "profileBatt" : "profileAc"
-    var v = String(setting(key, "") || "")
-    return root.profiles.indexOf(v) >= 0 ? v : ""
-  }
-
-  function rememberedAc() {
-    var v = rememberedProfile("ac")
-    return v !== "" ? v : "—"
-  }
-
-  function rememberedBatt() {
-    var v = rememberedProfile("battery")
-    return v !== "" ? v : "—"
   }
 
   function updateSettings(patch) {
@@ -213,7 +187,6 @@ Panel {
       batteryInfo = next
       root.recordDrainSample()
       root.refreshChargeThreshold()
-      root.checkLowBattery()
     } else {
       systemInfo = next
     }
@@ -233,68 +206,28 @@ Panel {
     }
   }
 
-  // Manual pick: saves into this source slot (settings mirror + native state
-  // file via omarchy-powerprofiles-set) and applies immediately.
+  // Manual pick for the current source (powerON = AC, powerOFF = battery).
+  // omarchy-powerprofiles-set persists it in the native per-source state
+  // file; the omarchy.battery service restores it automatically on the next
+  // plug/unplug switch. This widget never auto-applies profiles itself.
   function setProfile(profile) {
     if (!profile || actionProc.running) return
-    var source = root.sourceKey()
-    var patch = {}
-    patch[source === "battery" ? "profileBatt" : "profileAc"] = profile
-    root.updateSettings(patch)
-    actionProc.command = ["omarchy-powerprofiles-set", source, profile]
+    actionProc.command = ["omarchy-powerprofiles-set", root.sourceKey(), profile]
     actionProc.running = true
   }
 
-  function setRefresh(source, rate) {
-    var patch = {}
-    patch[source === "battery" ? "refreshBatt" : "refreshAc"] = rate
-    root.updateSettings(patch)
-    // Apply now when it affects the current source; otherwise it applies on
-    // the next plug/unplug switch.
-    if (source === root.sourceKey()) root.applyRefreshRate(rate)
-  }
-
-  // Auto path on plug/unplug: restore the remembered profile for the new
-  // source (settings mirror first, native state file as fallback), then
-  // apply that source's refresh rate.
-  function applySourcePreset() {
-    if (!batteryPresent) return
-    var source = root.sourceKey()
-    var profile = root.rememberedProfile(source)
-    console.log("[cyberdyne.battery] applySourcePreset source=" + source + " remembered=" + profile + " refresh=" + root.refreshForSource(source))
-    if (profile !== "") {
-      if (!autoProfileProc.running) {
-        autoProfileProc.command = ["omarchy-powerprofiles-set", source, profile]
-        autoProfileProc.running = true
-      }
-    } else {
-      if (!autoProfileProc.running) {
-        autoProfileProc.command = ["omarchy-powerprofiles-set", source]
-        autoProfileProc.running = true
-      }
-    }
-    root.applyRefreshRate(root.refreshForSource(source))
-  }
-
-  function applyRefreshRate(rate) {
-    root.pendingRefreshRate = rate
-    if (!monitorReadProc.running) monitorReadProc.running = true
-  }
-
+  // Read-only monitor discovery for the status line. Refresh rate is owned
+  // by hypr-refresh-auto -- this never writes monitor configuration.
   function handleMonitorsOutput(text) {
     var monitors = []
     try { monitors = JSON.parse(String(text || "[]")) } catch (e) { monitors = [] }
-    var target = Model.selectTargetMonitor(monitors)
-    if (target) root.currentMonitor = target
-    if (root.pendingRefreshRate === null || root.pendingRefreshRate === undefined) return
-    if (!target) {
-      root.pendingRefreshRate = null
-      return
+    for (var i = 0; i < monitors.length; i++) {
+      if (monitors[i] && monitors[i].focused) {
+        root.currentMonitor = monitors[i]
+        return
+      }
     }
-    var rate = root.pendingRefreshRate
-    root.pendingRefreshRate = null
-    monitorApplyProc.command = ["hyprctl", "keyword", "monitor", Model.monitorKeywordLine(target, rate)]
-    monitorApplyProc.running = true
+    if (monitors.length > 0) root.currentMonitor = monitors[0]
   }
 
   function togglePercentage() {
@@ -327,33 +260,6 @@ Panel {
     root.drainSamples = Model.appendDrainSample(root.drainSamples, watts, Date.now() / 1000, 600)
   }
 
-  // ---- Low-battery nudge. Fires once per discharge cycle via notify-send;
-  // flags reset on plug-in or once the level recovers above 30%.
-  function checkLowBattery() {
-    if (!root.discharging) {
-      root.notifiedLow = false
-      root.notifiedCritical = false
-      return
-    }
-    var pct = Math.round(root.batteryFraction * 100)
-    if (pct > 30) {
-      root.notifiedLow = false
-      root.notifiedCritical = false
-      return
-    }
-    if (pct <= 15 && !root.notifiedCritical) {
-      root.notifiedCritical = true
-      root.notifiedLow = true
-      notifyProc.command = ["notify-send", "-u", "critical", "Battery critical",
-        "Plug in now — " + pct + "% remaining."]
-      notifyProc.running = true
-    } else if (pct <= 25 && !root.notifiedLow) {
-      root.notifiedLow = true
-      notifyProc.command = ["notify-send", "Battery low", pct + "% remaining. Consider plugging in."]
-      notifyProc.running = true
-    }
-  }
-
   IpcHandler {
     target: "cyberdyne.battery"
 
@@ -381,15 +287,6 @@ Panel {
   }
 
   onBatteryPresentChanged: if (!batteryPresent) close()
-
-  onDischargingChanged: {
-    console.log("[cyberdyne.battery] discharging changed to " + root.discharging + " armed=" + root.autoSwitchArmed + " present=" + batteryPresent)
-    if (!root.autoSwitchArmed || !batteryPresent) return
-    root.refresh()
-    root.applySourcePreset()
-  }
-
-  onBatteryFractionChanged: root.checkLowBattery()
 
   visible: batteryPresent
   implicitWidth: batteryPresent ? button.implicitWidth : 0
@@ -419,11 +316,6 @@ Panel {
   }
 
   Process {
-    id: autoProfileProc
-    onExited: root.refresh()
-  }
-
-  Process {
     id: chargeThresholdReadProc
     stdout: StdioCollector {
       waitForEnd: true
@@ -436,18 +328,14 @@ Panel {
 
   Process { id: chargeThresholdActionProc; onExited: root.refreshChargeThreshold() }
 
+  // Read-only: feeds the refresh status line. Never writes monitors.
   Process {
     id: monitorReadProc
     command: ["hyprctl", "monitors", "-j"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.handleMonitorsOutput(text) }
   }
 
-  Process { id: monitorApplyProc }
-
-  Process { id: notifyProc }
-
   Component.onCompleted: {
-    root.autoSwitchArmed = true
     if (root.batteryPresent && !monitorReadProc.running) monitorReadProc.running = true
   }
 
@@ -728,7 +616,7 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            text: "AC remembers " + root.rememberedAc() + " · Batt remembers " + root.rememberedBatt()
+            text: "Auto-switch on plug/unplug is handled by the system service"
             color: root.bar.foreground
             opacity: 0.6
             font.family: root.bar.fontFamily
@@ -738,7 +626,7 @@ Panel {
           }
         }
 
-        // ---------- Refresh rate per source ----------
+        // ---------- Refresh rate (read-only). Owned by hypr-refresh-auto. ---
         Column {
           width: parent.width
           spacing: Style.space(10)
@@ -751,95 +639,19 @@ Panel {
             fontFamily: root.bar.fontFamily
           }
 
-          Row {
+          Text {
+            textFormat: Text.PlainText
+            text: root.monitorStatusText
+            color: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            elide: Text.ElideRight
             width: parent.width
-            spacing: Style.space(6)
-
-            Text {
-              textFormat: Text.PlainText
-              text: "Plugged"
-              color: root.bar.foreground
-              opacity: 0.6
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              anchors.verticalCenter: parent.verticalCenter
-              width: Math.max(0, parent.width / 3 - parent.spacing)
-              elide: Text.ElideRight
-            }
-
-            Button {
-              width: (parent.width / 3 - parent.spacing / 2)
-              text: "60Hz"
-              fontSize: Style.font.bodySmall
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              horizontalPadding: Style.spacing.controlPaddingX
-              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
-              bordered: true
-              active: root.refreshForSource("ac") === 60
-              onClicked: root.setRefresh("ac", 60)
-            }
-
-            Button {
-              width: (parent.width / 3 - parent.spacing / 2)
-              text: "120Hz"
-              fontSize: Style.font.bodySmall
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              horizontalPadding: Style.spacing.controlPaddingX
-              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
-              bordered: true
-              active: root.refreshForSource("ac") === 120
-              onClicked: root.setRefresh("ac", 120)
-            }
-          }
-
-          Row {
-            width: parent.width
-            spacing: Style.space(6)
-
-            Text {
-              textFormat: Text.PlainText
-              text: "Battery"
-              color: root.bar.foreground
-              opacity: 0.6
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              anchors.verticalCenter: parent.verticalCenter
-              width: Math.max(0, parent.width / 3 - parent.spacing)
-              elide: Text.ElideRight
-            }
-
-            Button {
-              width: (parent.width / 3 - parent.spacing / 2)
-              text: "60Hz"
-              fontSize: Style.font.bodySmall
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              horizontalPadding: Style.spacing.controlPaddingX
-              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
-              bordered: true
-              active: root.refreshForSource("battery") === 60
-              onClicked: root.setRefresh("battery", 60)
-            }
-
-            Button {
-              width: (parent.width / 3 - parent.spacing / 2)
-              text: "120Hz"
-              fontSize: Style.font.bodySmall
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              horizontalPadding: Style.spacing.controlPaddingX
-              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
-              bordered: true
-              active: root.refreshForSource("battery") === 120
-              onClicked: root.setRefresh("battery", 120)
-            }
           }
 
           Text {
             textFormat: Text.PlainText
-            text: root.monitorStatusText
+            text: "Managed by hypr-refresh-auto (120Hz AC · 60Hz battery)"
             color: root.bar.foreground
             opacity: 0.6
             font.family: root.bar.fontFamily

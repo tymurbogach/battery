@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "cyberdyne.battery",
   "name": "Battery",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "cyberdyne",
   "license": "MIT",
   "description": "Battery with independent AC/battery profiles, per-source refresh rate, charge-threshold toggle, and power-draw history.",

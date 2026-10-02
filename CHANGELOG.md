@@ -2,6 +2,15 @@
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.2.0 — One writer per subsystem
+
+### Removed
+
+- Display-refresh writer (`hyprctl keyword monitor` does not work with the Lua parser, and `hypr-refresh-auto` already owns refresh). The panel now shows refresh read-only.
+- Profile auto-switch and AC/battery settings mirror (the first-party `omarchy.battery` service owns it; the mirror risked applying stale profiles).
+- Low-battery notifier (the system service already warns at 10% through the official channel).
+- Debug logging.
+
 ## v0.1.0 — Initial release
 
 ### Added
