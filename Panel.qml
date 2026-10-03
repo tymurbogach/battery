@@ -35,17 +35,32 @@ Panel {
   property string batteryDbusPath: ""
   property var drainSamples: []
   property var currentMonitor: null
-  // Last profile whose Hz was written to the override file. Guards the
-  // open-sync in updateProfiles so it writes once per change, not on every
-  // refresh while the panel stays open. Only set on successful write.
-  property string hzAppliedFor: ""
-  property string hzPendingFor: ""
-  // Consecutive empty/failed refreshes. After 2 the panel marks data stale
-  // instead of showing the last known good forever.
-  property int refreshFailCount: 0
-  readonly property bool dataStale: refreshFailCount >= 2
+  // The Hz writer accepts the latest request while a previous write runs.
+  // It never claims that a queued value reached disk before it actually did.
+  property var requestedHz: null
+  property var inFlightHz: null
+  property var appliedHz: null
+  property int hzRevision: 0
+  property string pendingProfile: ""
+
+  // Keep command health independent. A successful system query must not hide
+  // a failed battery or profile query from the user.
+  property var refreshAttempts: ({ battery: 0, profiles: 0, system: 0, monitor: 0 })
+  property var refreshHealth: ({
+    battery: ({ failures: 0, error: "", failedAttempt: 0 }),
+    profiles: ({ failures: 0, error: "", failedAttempt: 0 }),
+    system: ({ failures: 0, error: "", failedAttempt: 0 }),
+    monitor: ({ failures: 0, error: "", failedAttempt: 0 })
+  })
+  readonly property bool dataStale: refreshHealth.battery.failures >= 2
+    || refreshHealth.profiles.failures >= 2
+  readonly property string staleError: refreshHealth.battery.failures >= 2
+    ? refreshHealth.battery.error : refreshHealth.profiles.error
   property string lastError: ""
+  property string sourceError: ""
   property bool profileBusy: false
+  property bool profileAutoAvailable: false
+  property bool refreshAutoAvailable: false
 
   // Guarded bar theme access. bar is null during startup/recreation;
   // content must not throw TypeError in that window.
@@ -83,12 +98,12 @@ Panel {
 
   function batteryIcon() {
     var device = UPower.displayDevice
-    return Model.batteryIcon(device, root.discharging, upowerStates())
+    return Model.batteryIcon(device, root.effectiveOnBattery, upowerStates())
   }
 
   function modeLabel() {
     var device = UPower.displayDevice
-    return Model.modeLabel(device, root.discharging, upowerStates())
+    return Model.modeLabel(device, root.effectiveOnBattery, upowerStates())
   }
 
   function profileIcon(name) {
@@ -97,17 +112,19 @@ Panel {
 
   readonly property bool fullyCharged: {
     var device = UPower.displayDevice
-    return device && device.isPresent && device.state === UPowerDeviceState.FullyCharged && !root.chargeThresholdActive
+    return device && device.isPresent && !root.effectiveOnBattery
+      && device.state === UPowerDeviceState.FullyCharged && !root.chargeThresholdActive
   }
   readonly property bool discharging: {
     var device = UPower.displayDevice
     return !!(device && device.isPresent && UPower.onBattery)
   }
+  readonly property bool effectiveOnBattery: sourceKey() === "battery"
   readonly property bool chargeThresholdActive: {
     var device = UPower.displayDevice
-    return Model.chargeThresholdActive(device, root.discharging, upowerStates())
+    return Model.chargeThresholdActive(device, root.effectiveOnBattery, upowerStates())
   }
-  readonly property bool batteryFull: fullyCharged || (!root.discharging && batteryFraction >= 1)
+  readonly property bool batteryFull: fullyCharged || (!root.effectiveOnBattery && batteryFraction >= 1)
   readonly property bool batteryFlowIdle: batteryFull || chargeThresholdActive
 
   // 0..1 charge level, used by the visual progress bar.
@@ -118,7 +135,7 @@ Panel {
 
   readonly property bool charging: {
     var d = UPower.displayDevice
-    return d && d.isPresent && !UPower.onBattery && !root.batteryFlowIdle
+    return d && d.isPresent && !root.effectiveOnBattery && !root.batteryFlowIdle
   }
 
   readonly property color batteryFillColor: {
@@ -190,7 +207,7 @@ Panel {
   readonly property var activePhrases: {
     if (fullyCharged) return []
     if (charging) return chargingPhrases
-    if (discharging) return onBatteryPhrases
+    if (effectiveOnBattery) return onBatteryPhrases
     return []
   }
   readonly property bool rotatingPhrases: activePhrases.length > 0
@@ -204,19 +221,37 @@ Panel {
   function refresh() {
     if (!batteryPresent) return
     stallTimer.restart()
-    if (!batteryProc.running) batteryProc.running = true
-    if (!profilesProc.running) profilesProc.running = true
-    if (!systemProc.running) systemProc.running = true
+    startRefresh("battery", batteryProc)
+    startRefresh("profiles", profilesProc)
+    startRefresh("system", systemProc)
   }
 
-  function noteRefreshSuccess() {
-    refreshFailCount = 0
-    lastError = ""
+  function startRefresh(name, process) {
+    if (process.running) return
+    var next = Object.assign({}, refreshAttempts)
+    next[name] = (next[name] || 0) + 1
+    refreshAttempts = next
+    process.running = true
   }
 
-  function noteRefreshFailure(msg) {
-    refreshFailCount = Math.min(99, refreshFailCount + 1)
-    if (msg) lastError = msg
+  function noteRefreshSuccess(name) {
+    var state = refreshHealth[name] || ({ failures: 0, error: "", failedAttempt: 0 })
+    var next = Object.assign({}, refreshHealth)
+    next[name] = ({ failures: 0, error: "", failedAttempt: state.failedAttempt })
+    refreshHealth = next
+  }
+
+  function noteRefreshFailure(name, msg) {
+    var attempt = refreshAttempts[name] || 0
+    var state = refreshHealth[name] || ({ failures: 0, error: "", failedAttempt: 0 })
+    if (state.failedAttempt === attempt) return
+    var next = Object.assign({}, refreshHealth)
+    next[name] = ({
+      failures: Math.min(99, state.failures + 1),
+      error: msg || state.error || "refresh failed",
+      failedAttempt: attempt
+    })
+    refreshHealth = next
   }
 
   function updateKeyValue(raw, targetName) {
@@ -225,10 +260,10 @@ Panel {
     // around AC plug/unplug events. Avoids the section collapsing mid-transition.
     // After consecutive failures mark stale instead of trusting old data forever.
     if (Object.keys(next).length === 0) {
-      root.noteRefreshFailure(targetName + " empty")
+      root.noteRefreshFailure(targetName, targetName + " empty")
       return
     }
-    root.noteRefreshSuccess()
+    root.noteRefreshSuccess(targetName)
     if (targetName === "battery") {
       batteryInfo = next
       root.recordDrainSample()
@@ -243,10 +278,10 @@ Panel {
     // Same guard as battery: preserve the last known profile list across
     // transient empty payloads so the buttons don't blink out.
     if (parsed.profiles.length === 0) {
-      root.noteRefreshFailure("profiles empty")
+      root.noteRefreshFailure("profiles", "profiles empty")
       return
     }
-    root.noteRefreshSuccess()
+    root.noteRefreshSuccess("profiles")
     profiles = parsed.profiles
     activeProfile = parsed.activeProfile
     profileIndex = parsed.profileIndex
@@ -257,24 +292,24 @@ Panel {
     // Enforce the per-profile Hz invariant when the active profile changed
     // somewhere else (menu, CLI, plug/unplug service) while open.
     // Mark applied only on successful write; queue pending otherwise.
-    if (root.opened && root.activeProfile !== "" && root.hzAppliedFor !== root.activeProfile
-        && root.profiles.indexOf(root.activeProfile) >= 0) {
-      root.hzPendingFor = root.activeProfile
-      root.writeHzOverride(root.hzForProfile(root.activeProfile))
+    var desiredHz = root.hzForProfile(root.activeProfile)
+    if (root.opened && root.activeProfile !== "" && root.profiles.indexOf(root.activeProfile) >= 0
+        && (!root.appliedHz || root.appliedHz.profile !== root.activeProfile
+          || root.appliedHz.rate !== desiredHz)) {
+      root.requestHzOverride(root.activeProfile, desiredHz)
     }
   }
 
   // Manual pick for the current source (powerON = AC, powerOFF = battery).
   // omarchy-powerprofiles-set persists it in the native per-source state
   // file; hypr-profile-auto restores it automatically on plug/unplug.
-  // Applies this profile's remembered Hz as well.
+  // The Hz override follows only after this command succeeds.
   function setProfile(profile) {
     if (!profile || root.profileBusy) return
     root.profileBusy = true
+    root.pendingProfile = profile
     actionProc.command = ["omarchy-powerprofiles-set", root.sourceKey(), profile]
     actionProc.running = true
-    root.hzPendingFor = profile
-    root.writeHzOverride(root.hzForProfile(profile))
   }
 
   // ---- Per-profile 120Hz toggle. The value is stored in settings under the
@@ -291,16 +326,33 @@ Panel {
     return (Quickshell.env("HOME") || "") + "/.local/state/omarchy/toggles/hypr"
   }
 
-  function writeHzOverride(rate) {
-    if (hzWriteProc.running) return
+  function requestHzOverride(profile, rate) {
+    if (!profile) return
+    if (inFlightHz && inFlightHz.profile === profile && inFlightHz.rate === rate) {
+      // A rapid toggle can return to the value that is already on disk. Drop
+      // a different queued request instead of applying it after this write.
+      requestedHz = inFlightHz
+      return
+    }
+    if (requestedHz && requestedHz.profile === profile && requestedHz.rate === rate) return
+    if (!hzWriteProc.running && appliedHz && appliedHz.profile === profile && appliedHz.rate === rate) return
+    hzRevision += 1
+    requestedHz = ({ profile: profile, rate: rate, revision: hzRevision })
+    flushHzOverride()
+  }
+
+  function flushHzOverride() {
+    if (hzWriteProc.running || !requestedHz) return
     var dir = root.hzOverrideDir()
     if (!dir || dir === "/.local/state/omarchy/toggles/hypr") {
       root.lastError = "HOME unset, cannot write Hz override"
+      requestedHz = null
       return
     }
+    inFlightHz = requestedHz
     hzWriteProc.command = ["bash", "-c",
       'mkdir -p "$2" && printf "%s" "$1" > "$2/refresh-override-hz"',
-      "_", String(rate), dir]
+      "_", String(inFlightHz.rate), dir]
     hzWriteProc.running = true
   }
 
@@ -313,9 +365,8 @@ Panel {
     var patch = {}
     patch[key] = next
     root.updateSettings(patch)
-    root.hzPendingFor = profile
-    root.writeHzOverride(next)
-    if (!monitorReadProc.running) monitorReadProc.running = true
+    root.requestHzOverride(profile, next)
+    startRefresh("monitor", monitorReadProc)
   }
 
   // Read-only monitor discovery for the status line. Refresh rate is owned
@@ -323,14 +374,15 @@ Panel {
   function handleMonitorsOutput(text) {
     var parsed = null
     try { parsed = JSON.parse(String(text || "")) } catch (e) { parsed = null }
-    if (!Array.isArray(parsed) || parsed.length === 0) return
+    if (!Array.isArray(parsed) || parsed.length === 0) return false
     for (var i = 0; i < parsed.length; i++) {
       if (parsed[i] && parsed[i].focused) {
         root.currentMonitor = parsed[i]
-        return
+        return true
       }
     }
     root.currentMonitor = parsed[0]
+    return true
   }
 
   function togglePercentage() {
@@ -405,12 +457,34 @@ Panel {
 
   function handleAcProbe(code) {
     var src = Model.probeSourceFromExit(code)
+    if (src === "") {
+      root.sourceError = "Power source probe failed (exit " + code + ")"
+      return
+    }
+    root.sourceError = ""
     if (src !== root.acSource) {
       root.acSource = src
       // Source flipped: refresh text fields now instead of next poll tick.
-      root.refreshFailCount = 0
       root.refresh()
-      if (!monitorReadProc.running) monitorReadProc.running = true
+      startRefresh("monitor", monitorReadProc)
+    }
+  }
+
+  function daemonPath(name) {
+    var home = Quickshell.env("HOME") || ""
+    return home ? home + "/.local/bin/" + name : ""
+  }
+
+  function probeDaemons() {
+    var profilePath = daemonPath("hypr-profile-auto")
+    var refreshPath = daemonPath("hypr-refresh-auto")
+    if (profilePath && !profileAutoProc.running) {
+      profileAutoProc.command = ["bash", "-c", 'test -x "$1"', "_", profilePath]
+      profileAutoProc.running = true
+    }
+    if (refreshPath && !refreshAutoProc.running) {
+      refreshAutoProc.command = ["bash", "-c", 'test -x "$1"', "_", refreshPath]
+      refreshAutoProc.running = true
     }
   }
 
@@ -439,7 +513,8 @@ Panel {
 
       refresh()
       root.probeAcSource()
-      if (!monitorReadProc.running) monitorReadProc.running = true
+      root.probeDaemons()
+      startRefresh("monitor", monitorReadProc)
       if (!udevMonProc.running) udevMonProc.running = true
       var idx = profiles.indexOf(activeProfile)
       profileIndex = idx >= 0 ? idx : 0
@@ -460,9 +535,8 @@ Panel {
     target: UPower
     function onOnBatteryChanged() {
       root.probeAcSource()
-      root.refreshFailCount = 0
       root.refresh()
-      if (!monitorReadProc.running) monitorReadProc.running = true
+      startRefresh("monitor", monitorReadProc)
     }
   }
 
@@ -474,33 +548,33 @@ Panel {
     id: batteryProc
     command: ["omarchy-battery-status", "--shell"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.updateKeyValue(text, "battery") }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: if (text && String(text).trim() !== "") root.noteRefreshFailure("battery: " + String(text).trim().slice(0, 120))
+    stderr: StdioCollector { waitForEnd: true; id: batteryStderr }
+    onExited: function(code) {
+      if (code !== 0) root.noteRefreshFailure("battery", "battery exit " + code
+        + (batteryStderr.text ? ": " + String(batteryStderr.text).trim().slice(0, 120) : ""))
     }
-    onExited: function(code) { if (code !== 0) root.noteRefreshFailure("battery exit " + code) }
   }
 
   Process {
     id: profilesProc
     command: ["omarchy-powerprofiles-list", "--active-state"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.updateProfiles(text) }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: if (text && String(text).trim() !== "") root.noteRefreshFailure("profiles: " + String(text).trim().slice(0, 120))
+    stderr: StdioCollector { waitForEnd: true; id: profilesStderr }
+    onExited: function(code) {
+      if (code !== 0) root.noteRefreshFailure("profiles", "profiles exit " + code
+        + (profilesStderr.text ? ": " + String(profilesStderr.text).trim().slice(0, 120) : ""))
     }
-    onExited: function(code) { if (code !== 0) root.noteRefreshFailure("profiles exit " + code) }
   }
 
   Process {
     id: systemProc
     command: ["omarchy-system-stats"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.updateKeyValue(text, "system") }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: if (text && String(text).trim() !== "") root.noteRefreshFailure("system: " + String(text).trim().slice(0, 120))
+    stderr: StdioCollector { waitForEnd: true; id: systemStderr }
+    onExited: function(code) {
+      if (code !== 0) root.noteRefreshFailure("system", "system exit " + code
+        + (systemStderr.text ? ": " + String(systemStderr.text).trim().slice(0, 120) : ""))
     }
-    onExited: function(code) { if (code !== 0) root.noteRefreshFailure("system exit " + code) }
   }
 
   Process {
@@ -508,9 +582,14 @@ Panel {
     stderr: StdioCollector { waitForEnd: true; id: actionStderr }
     onExited: function(code) {
       root.profileBusy = false
+      var profile = root.pendingProfile
+      root.pendingProfile = ""
       if (code !== 0) {
         root.lastError = "Profile switch failed (exit " + code + ")"
         if (actionStderr.text) root.lastError += ": " + String(actionStderr.text).trim().slice(0, 120)
+      } else {
+        root.lastError = ""
+        root.requestHzOverride(profile, root.hzForProfile(profile))
       }
       root.refresh()
     }
@@ -535,6 +614,20 @@ Panel {
     stdout: StdioCollector { waitForEnd: true }
     stderr: StdioCollector { waitForEnd: true }
     onExited: function(code) { root.handleAcProbe(code) }
+  }
+
+  Process {
+    id: profileAutoProc
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: function(code) { root.profileAutoAvailable = code === 0 }
+  }
+
+  Process {
+    id: refreshAutoProc
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: function(code) { root.refreshAutoAvailable = code === 0 }
   }
 
   // Kernel uevents for power_supply while the panel is open. A plug or
@@ -601,9 +694,16 @@ Panel {
   Process {
     id: monitorReadProc
     command: ["hyprctl", "monitors", "-j"]
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.handleMonitorsOutput(text) }
-    stderr: StdioCollector { waitForEnd: true }
-    onExited: function(code) { if (code !== 0) root.lastError = "hyprctl monitors exit " + code }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (!root.handleMonitorsOutput(text)) root.noteRefreshFailure("monitor", "monitor output invalid")
+    }
+    stderr: StdioCollector { waitForEnd: true; id: monitorStderr }
+    onExited: function(code) {
+      if (code !== 0) root.noteRefreshFailure("monitor", "hyprctl monitors exit " + code
+        + (monitorStderr.text ? ": " + String(monitorStderr.text).trim().slice(0, 120) : ""))
+      else root.noteRefreshSuccess("monitor")
+    }
   }
 
   // Writes the per-profile Hz override file watched by hypr-refresh-auto.
@@ -611,17 +711,23 @@ Panel {
     id: hzWriteProc
     stderr: StdioCollector { waitForEnd: true; id: hzWriteStderr }
     onExited: function(code) {
-      if (code === 0) {
-        root.hzAppliedFor = root.hzPendingFor
+      var completed = root.inFlightHz
+      root.inFlightHz = null
+      if (code === 0 && completed) {
+        root.appliedHz = completed
+        if (root.requestedHz && root.requestedHz.revision === completed.revision) root.requestedHz = null
+        root.lastError = ""
       } else {
         root.lastError = "Hz override write failed (exit " + code + ")"
         if (hzWriteStderr.text) root.lastError += ": " + String(hzWriteStderr.text).trim().slice(0, 120)
+        if (root.requestedHz && completed && root.requestedHz.revision === completed.revision) root.requestedHz = null
       }
+      root.flushHzOverride()
     }
   }
 
   Component.onCompleted: {
-    if (root.batteryPresent && !monitorReadProc.running) monitorReadProc.running = true
+    if (root.batteryPresent) startRefresh("monitor", monitorReadProc)
   }
 
   // Main poll: 15s while open. UPower displayDevice already pushes
@@ -629,7 +735,7 @@ Panel {
   Timer { interval: 15000; running: root.opened; repeat: true; onTriggered: root.refresh() }
 
   // Monitor rate is informational and changes rarely; 30s is enough.
-  Timer { interval: 30000; running: root.opened; repeat: true; onTriggered: if (!monitorReadProc.running) monitorReadProc.running = true }
+  Timer { interval: 30000; running: root.opened; repeat: true; onTriggered: root.startRefresh("monitor", monitorReadProc) }
 
   // A hung CLI would freeze refresh forever since a running Process
   // cannot restart. Kill stragglers so the next tick recovers.
@@ -638,13 +744,21 @@ Panel {
     id: stallTimer
     interval: 10000
     onTriggered: {
-      var killed = false
-      if (batteryProc.running) { batteryProc.running = false; killed = true }
-      if (profilesProc.running) { profilesProc.running = false; killed = true }
-      if (systemProc.running) { systemProc.running = false; killed = true }
-      if (monitorReadProc.running) { monitorReadProc.running = false; killed = true }
-      if (acProbeProc.running) { acProbeProc.running = false; killed = true }
-      if (killed) root.noteRefreshFailure("timeout, retrying")
+      var batteryStalled = batteryProc.running
+      var profilesStalled = profilesProc.running
+      var systemStalled = systemProc.running
+      var monitorStalled = monitorReadProc.running
+      var probeStalled = acProbeProc.running
+      if (batteryStalled) batteryProc.running = false
+      if (profilesStalled) profilesProc.running = false
+      if (systemStalled) systemProc.running = false
+      if (monitorStalled) monitorReadProc.running = false
+      if (probeStalled) acProbeProc.running = false
+      if (batteryStalled) root.noteRefreshFailure("battery", "battery timeout, retrying")
+      if (profilesStalled) root.noteRefreshFailure("profiles", "profiles timeout, retrying")
+      if (systemStalled) root.noteRefreshFailure("system", "system timeout, retrying")
+      if (monitorStalled) root.noteRefreshFailure("monitor", "monitor timeout, retrying")
+      if (probeStalled) root.sourceError = "Power source probe timed out"
     }
   }
 
@@ -848,12 +962,13 @@ Panel {
 
         // ---------- Status banner: stale data or visible errors ----------
         Text {
-          visible: root.dataStale || root.lastError !== "" || root.sourceConflict
+          visible: root.dataStale || root.lastError !== "" || root.sourceError !== "" || root.sourceConflict
           width: parent.width
           textFormat: Text.PlainText
           text: {
             if (root.sourceConflict) return "SYSFS ▸ " + root.sourceLabel() + " (UPower stale)"
-            return root.dataStale ? ("STALE · " + (root.lastError || "retrying")) : root.lastError
+            if (root.sourceError !== "") return root.sourceError
+            return root.dataStale ? ("STALE · " + (root.staleError || "retrying")) : root.lastError
           }
           color: root.fg
           opacity: 0.7
@@ -885,11 +1000,11 @@ Panel {
             width: (parent.width - parent.spacing) / 2
             spacing: Style.spacing.labelGap
             InfoPair {
-              label: root.chargeThresholdActive ? "Charge limit" : (root.discharging ? "Time left" : "Time to full")
+              label: root.chargeThresholdActive ? "Charge limit" : (root.effectiveOnBattery ? "Time left" : "Time to full")
               value: root.chargeThresholdActive ? (root.batteryInfo.threshold || "—") : (root.batteryFlowIdle ? "—" : (root.batteryInfo.time || "—"))
             }
             InfoPair {
-              label: root.chargeThresholdActive ? "Battery state" : (root.discharging ? "Discharging" : "Charging")
+              label: root.chargeThresholdActive ? "Battery state" : (root.effectiveOnBattery ? "Discharging" : "Charging")
               value: root.chargeThresholdActive ? "Holding" : (root.batteryFull ? "—" : (root.batteryInfo.rate || "—"))
             }
           }
@@ -954,7 +1069,8 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            text: "Auto-switch: hypr-profile-auto daemon"
+            text: root.profileAutoAvailable ? "Auto-switch: hypr-profile-auto daemon"
+              : "Auto-switch unavailable: hypr-profile-auto not found"
             color: root.fg
             opacity: 0.6
             font.family: root.ff
@@ -981,9 +1097,10 @@ Panel {
           Toggle {
             width: parent.width
             label: "120Hz in " + Model.prettyProfile(root.activeProfile)
-            description: root.monitorStatusText
+            description: root.refreshAutoAvailable ? root.monitorStatusText
+              : root.monitorStatusText + " · hypr-refresh-auto not found"
             checked: root.hzForProfile(root.activeProfile) === 120
-            enabled: root.profiles.indexOf(root.activeProfile) >= 0
+            enabled: root.profiles.indexOf(root.activeProfile) >= 0 && !root.profileBusy
             foreground: root.fg
             accent: Color.accent
             fontFamily: root.ff

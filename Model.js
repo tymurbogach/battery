@@ -196,9 +196,13 @@ function prettyProfile(profile) {
 
 // ---- AC/battery source arbitration. UPower OnBattery can freeze on stale
 // line_power_AC records; omarchy-power-present (sysfs) is the tiebreaker.
-// Probe maps its exit code: 0 = AC plugged, anything else = on battery.
+// Probe maps its documented exit codes: 0 = AC, 1 = battery. Any other
+// code is an operational error and must not overwrite the last known source.
 function probeSourceFromExit(code) {
-  return Number(code) === 0 ? "ac" : "battery"
+  var value = Number(code)
+  if (value === 0) return "ac"
+  if (value === 1) return "battery"
+  return ""
 }
 
 // Prefers the sysfs probe when known, falls back to the UPower derivation.

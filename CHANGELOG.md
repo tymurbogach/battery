@@ -2,6 +2,20 @@
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed
+
+- Queue refresh-rate writes so rapid changes persist only the newest value.
+- Apply a selected profile's refresh rate only after its profile command succeeds.
+- Preserve the last valid power source when `omarchy-power-present` exits unexpectedly.
+- Track battery and profile refresh failures independently before showing `STALE`.
+
+### Changed
+
+- Use the sysfs-arbitrated source for source-dependent icon, status, and panel text.
+- Show whether the optional profile and refresh daemons are available.
+
 ## v0.7.0 — Instant AC/battery reaction
 
 ### Added
