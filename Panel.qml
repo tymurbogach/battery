@@ -32,6 +32,9 @@ Panel {
   // and watch the file. No ~/.local/bin daemon required.
   property bool chargeThresholdEnabled: false
   property string chargeThresholdError: ""
+  // False until the first successful D-Bus read lands. The toggle stays
+  // disabled meanwhile so it never flashes a wrong off state.
+  property bool chargeThresholdKnown: false
   property string batteryDbusPath: ""
   property var drainSamples: []
   property var currentMonitor: null
@@ -621,6 +624,7 @@ Panel {
 
       refresh()
       root.probeAcSource()
+      root.refreshChargeThreshold()
       startRefresh("monitor", monitorReadProc)
       root.scheduleMonitorCatchUp()
       if (!udevMonProc.running) udevMonProc.running = true
@@ -758,6 +762,7 @@ Panel {
         var value = Model.parseGdbusBoolean(text)
         if (value !== null) {
           root.chargeThresholdEnabled = value
+          root.chargeThresholdKnown = true
           root.chargeThresholdError = ""
         } else {
           root.chargeThresholdError = "Threshold read failed"
@@ -1290,10 +1295,12 @@ Panel {
               width: parent.width
               label: "Charge threshold"
               description: root.chargeThresholdError !== "" ? root.chargeThresholdError
+                : !root.chargeThresholdKnown ? "Reading state…"
                 : root.batteryInfo.threshold
                 ? ("Hold at " + root.batteryInfo.threshold + " to protect battery health")
                 : "Hold charge below the firmware limit"
               checked: root.chargeThresholdEnabled
+              enabled: root.chargeThresholdKnown && !chargeThresholdActionProc.running
               foreground: root.fg
               accent: Color.accent
               fontFamily: root.ff
