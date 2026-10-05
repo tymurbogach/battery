@@ -18,7 +18,7 @@ Needs: Omarchy · laptop with UPower battery · no network, no sudo.
 
 ```
 omarchy plugin add https://github.com/tymurbogach/battery.git --enable
-omarchy bar move cyberdyne.battery --section right --index 99
+omarchy bar move tymurbogach.battery --section right --index 99
 omarchy restart shell
 ```
 
@@ -59,14 +59,14 @@ Inline on the bar entry:
 ## Update
 
 ```
-omarchy plugin update cyberdyne.battery --yes
+omarchy plugin update tymurbogach.battery --yes
 omarchy restart shell
 ```
 
 ## Remove
 
 ```
-omarchy plugin remove cyberdyne.battery
+omarchy plugin remove tymurbogach.battery
 ```
 
 Native profile files stay untouched. Delete `refresh-override-hz` by hand if you want the rates gone too.

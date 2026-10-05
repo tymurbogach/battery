@@ -4,6 +4,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## v0.8.1 — Plugin id rename
+
+### Changed
+
+- Plugin id `cyberdyne.battery` is now `tymurbogach.battery` (author namespace, like the other projects). Reinstall required: remove the old id, add the new one, put it back on the bar. Per-profile Hz and percentage settings live on the bar entry, so re-apply them after the move.
+
 ## v0.8.0 — Built-in power and refresh ownership
 
 ### Added

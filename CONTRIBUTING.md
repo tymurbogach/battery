@@ -1,4 +1,4 @@
-# Contributing to battery (cyberdyne.battery)
+# Contributing to battery (tymurbogach.battery)
 
 Keep changes small and reversible. One concern per commit.
 
@@ -23,9 +23,9 @@ node --test test/model.test.js
 From-zero install against the exact ID:
 
 ```bash
-omarchy plugin disable cyberdyne.battery
-omarchy plugin remove cyberdyne.battery --yes
-test ! -e "$HOME/.config/omarchy/plugins/cyberdyne.battery"
+omarchy plugin disable tymurbogach.battery
+omarchy plugin remove tymurbogach.battery --yes
+test ! -e "$HOME/.config/omarchy/plugins/tymurbogach.battery"
 omarchy plugin add <repo-or-path> --enable --yes
 omarchy restart shell
 ```

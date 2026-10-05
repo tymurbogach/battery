@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "cyberdyne.battery",
+  "id": "tymurbogach.battery",
   "name": "Battery",
-  "version": "0.8.0",
-  "author": "cyberdyne",
+  "version": "0.8.1",
+  "author": "tymurbogach",
   "license": "MIT",
   "description": "Battery with built-in per-source profiles and per-profile Hz, no daemon.",
   "kinds": [
