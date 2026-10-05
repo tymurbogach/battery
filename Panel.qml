@@ -177,12 +177,6 @@ Panel {
     return src + " · " + pctText + extra + stale
   }
 
-  readonly property string monitorStatusText: {
-    if (!root.currentMonitor) return "Detecting display…"
-    var hz = Math.round(Number(root.currentMonitor.refreshRate || 0))
-    return (root.currentMonitor.name || "Display") + " · now " + (hz > 0 ? hz + "Hz" : "—")
-  }
-
   // Cute agent-flavored phrases shown in the hero status line, rotated on a
   // timer so the panel feels alive when current is flowing (either direction).
   readonly property var chargingPhrases: [
@@ -468,6 +462,18 @@ Panel {
     root.requestHzOverride(profile, next)
     startRefresh("monitor", monitorReadProc)
     root.scheduleMonitorCatchUp()
+  }
+
+  // One-line status for the refresh toggle: desired rate for the active
+  // profile on the left of the arrow, live monitor rate on the right.
+  // The "(applying…)" tail only shows while a write or apply is queued
+  // or running, never from a stale live value alone.
+  function hzRefreshDescription() {
+    var desired = root.hzForProfile(root.activeProfile)
+    var live = Math.round(Number(root.currentMonitor ? root.currentMonitor.refreshRate : 0))
+    var s = Model.prettyProfile(root.activeProfile) + " → " + desired + "Hz · now " + (live > 0 ? live + "Hz" : "—")
+    if (hzWriteProc.running || hzApplyProc.running || root.pendingHzApply !== null) s += " (applying…)"
+    return s
   }
 
   // Live monitor discovery for the status line. On every read, retry a
@@ -1182,7 +1188,9 @@ Panel {
           }
         }
 
-        // ---------- Power profile per source ----------
+        // ---------- Power profile per source, plus its refresh rate.
+        // The toggle below always follows the active pill, so no
+        // "in <profile>" is needed: the pill already says the profile.
         PanelSeparator {
           foreground: root.fg
         }
@@ -1249,27 +1257,11 @@ Panel {
             elide: Text.ElideRight
             width: parent.width
           }
-        }
-
-        // ---------- Refresh: one 120Hz toggle per profile. Applied
-        // directly with hyprctl; the shared file stays as contract with
-        // the future display plugin. ----------------------------------
-        Column {
-          width: parent.width
-          spacing: Style.space(10)
-
-          PanelSeparator { foreground: root.fg }
-
-          PanelSectionHeader {
-            text: "DISPLAY REFRESH"
-            foreground: root.fg
-            fontFamily: root.ff
-          }
 
           Toggle {
             width: parent.width
-            label: "120Hz in " + Model.prettyProfile(root.activeProfile)
-            description: root.monitorStatusText
+            label: "Refresh rate"
+            description: root.hzRefreshDescription()
             checked: root.hzForProfile(root.activeProfile) === 120
             enabled: root.profiles.indexOf(root.activeProfile) >= 0 && !root.profileBusy
             foreground: root.fg
