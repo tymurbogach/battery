@@ -2,109 +2,59 @@
 
 Per-source power profiles, per-profile Hz, charge cap, and drain history — in the bar.
 
-![Battery bar pill and open panel](preview.png)
+![Battery panel](preview.png)
 
 Needs: Omarchy · laptop with UPower battery · no network, no sudo.
 
 ## What you get
 
-- **Per-source power profiles** — one pill per profile, remembered separately for AC and battery.
-- **Per-profile 120Hz toggle** — each profile keeps its own refresh rate.
+- **Per-source power profiles** — one pill per profile, remembered separately for AC and battery. Auto-switch built in.
+- **Per-profile refresh rate** — each profile keeps its own 60/120Hz. Desired vs live in one line.
 - **Charge-threshold toggle** — hold at the firmware limit to protect battery health.
-- **Drain sparkline** — 10 minutes of live watts plus a health line, no database.
-- **Instant plug/unplug reaction** — UPower signal plus kernel uevents, with sysfs arbitration when UPower goes stale.
+- **Drain sparkline** — last 10 minutes of watts, no database.
+- **No daemon** — the panel owns profile restore and Hz apply. Nothing runs in the background.
 
-![Bar pill with percentage](docs/images/bar-pill.png)
+## Install
+
+```
+omarchy plugin add https://github.com/tymurbogach/battery.git --enable
+omarchy bar move cyberdyne.battery --section right --index 99
+omarchy restart shell
+```
+
+## Use
 
 | Click | Action |
 |---|---|
 | Left click pill | Open / close the panel |
 | Right click pill | Toggle percentage |
 | Click profile pill | Set profile for the current source |
-| Refresh rate toggle | Set refresh rate for the active profile |
+| Refresh rate toggle | Set rate for the active profile |
 | Charge threshold toggle | Hold charge below the firmware limit |
 
-## Screenshots
+- The header shows the active source (`POWER · ON AC` / `ON BATTERY`).
+- Refresh reads `Balanced → 120Hz · now 120Hz`: desired left, live right, `applying…` while a change lands.
+- Threshold shows only when the hardware reports one. Its state reads on every open.
+- The graph records only while discharging.
+- `STALE` means two failed refreshes in a row. `SYSFS ▸ …` means UPower disagrees and sysfs won.
 
-| Profiles + refresh | Charge threshold |
+## Settings
+
+Inline on the bar entry:
+
+| Key | Default |
 |---|---|
-| ![Profile pills and refresh toggle](docs/images/profiles-hz.png) | ![Charge threshold toggle](docs/images/threshold.png) |
-
-| Drain history | |
-|---|---|
-| ![Power draw sparkline and health line](docs/images/sparkline.png) | |
-
-## Requirements
-
-Required (standard on Omarchy): `omarchy-battery-status`, `omarchy-power-present`, `omarchy-powerprofiles-list`, `omarchy-powerprofiles-set`, `omarchy-system-stats`, `hyprctl`, `gdbus`, `upower`, `udevadm`, `bash`.
-
-No background daemon. The panel owns profile restore and Hz apply. No `~/.local/bin` file is needed.
-
-## Install
-
-1. Add the plugin:
-
-```
-omarchy plugin add https://github.com/tymurbogach/battery.git --enable
-```
-
-2. Put it on the bar at the far right end (replaces `omarchy.power`):
-
-```
-omarchy bar move cyberdyne.battery --section right --index 99
-```
-
-Any large index lands last. To place it elsewhere, pick your own anchor instead:
-
-```
-omarchy bar move cyberdyne.battery --after omarchy.audio
-omarchy bar move cyberdyne.battery --section right --index 0
-```
-
-3. Restart the shell and look right:
-
-```
-omarchy restart shell
-```
-
-## Usage
-
-- Click the bar pill to open the panel, click a profile pill to set it for the current source.
-- The header shows which source is active (`POWER · ON AC` or `POWER · ON BATTERY`).
-- Flip the Refresh rate toggle to set the rate for the active profile. It lives in the `POWER` section under the profile pills and reads `Balanced → 120Hz · now 120Hz` (desired left of the arrow, live right of it, `applying…` while a change lands). Both this toggle and the future display plugin edit the same shared file plus the same per-profile key, so they stay in sync.
-- Flip Charge threshold only when the row is visible (hardware must report a threshold).
-- The bottom graph needs the panel open for a few samples before it draws. It records only while discharging.
-- If data goes stale, the panel shows a `STALE` banner with the last error instead of trusting old values.
-- If sysfs disagrees with UPower, the banner shows `SYSFS ▸ … (UPower stale)` and sysfs wins. If the probe fails, the last valid source stays active.
-
-## Configure
-
-Settings live inline on the bar entry (via `updateEntryInline`):
-
-| Key | Default | Purpose |
-|---|---|---|
-| `showPercentage` | `false` | Show `79%` on the bar pill |
-| `hz_power-saver` | `60` | Refresh rate for power-saver |
-| `hz_balanced` | `120` | Refresh rate for balanced |
-| `hz_performance` | `120` | Refresh rate for performance |
-
-Legacy keys `refreshAc` / `refreshBatt` (v0.1.0) are ignored since v0.2.0. They stay orphaned in `shell.json` and cause no error. Delete them by hand if you want a clean entry.
+| `showPercentage` | `false` |
+| `hz_power-saver` | `60` |
+| `hz_balanced` | `120` |
+| `hz_performance` | `120` |
 
 ## How it works
 
-- **Profiles**: `omarchy-powerprofiles-set <ac|battery> <profile>` on manual pick (writes the native state file). On cable change the panel itself runs `omarchy-powerprofiles-set <ac|battery>` (restore remembered profile, sysfs signal, no UPower, no daemon).
-- **Instant reaction**: plug/unplug wakes the panel through the UPower `onBatteryChanged` signal plus kernel uevents (`udevadm monitor --subsystem-match=power_supply`, panel-open only, 500ms debounce). Every trigger runs one-shot `omarchy-power-present` (sysfs). Exit `0` means AC and exit `1` means battery. Other exits preserve the last valid source and show an error.
-- **Refresh**: the toggle lives in the `POWER` section under the profile pills and stores 60/120 per profile in settings and in the shared file `~/.local/state/omarchy/toggles/hypr/refresh-override-hz` (single desired rate, same contract the future display plugin uses: manual change writes file plus `hz_<active>`, profile switch copies `hz_<new>` to the file, equal values are ignored). The panel applies it directly with `hyprctl eval hl.monitor`, preserving the live geometry, scale, and position. No polling daemon. A catch-up burst (immediate plus 2.5s plus 8s) refreshes the live `now` rate after open, event, or apply. The lid flag `internal-monitor-disable.conf` and a disabled `eDP-1` are never forced.
-- **Threshold**: two plain-argv steps, no shell interpolation. First `upower -e` resolves the battery object path (prefers `battery_BAT0`, skips HID++ and line_power). Then `gdbus call` against `org.freedesktop.UPower` for `ChargeThresholdEnabled` read and `EnableChargeThreshold` write with that path. The toggle stays disabled with `Reading state…` until the first successful read lands, and the state is re-read on every open.
-- **Draw history**: reuses the `rate` field from every `omarchy-battery-status --shell` sample while effectively discharging (sysfs-arbitrated), in a rolling 600s window capped at 200 samples.
-- **Polling**: CLI text fields refresh every 15s while the panel is open as safety net for missed signals. Monitor rate has no permanent poll: one immediate read plus a catch-up burst (2.5s, 8s) after open, cable event, file change, or apply. A 10s watchdog kills hung queries so the next tick recovers. Battery and profile failures track independently. Either source marks data `STALE` after 2 failures.
-- **Settings**: `showPercentage`, `hz_power-saver`, `hz_balanced`, `hz_performance`. Stored inline on the bar entry via `updateEntryInline`.
-
-## Known issues
-
-- **Stale UPower AC record**: on this hardware UPower's `line_power_AC` can stop updating. The widget uses the sysfs probe for source-dependent UI, profile writes, and drain history. UPower can still report stale battery telemetry. A one-time `sudo systemctl restart upower` re-reads sysfs; if it recurs, it is an upstream UPower/udev event-delivery issue.
-
-This listing is not a security audit or certification. The plugin runs unsandboxed inside `omarchy-shell`; every dependency, process, and file write above is public review surface.
+- Cable change restores the remembered profile via `omarchy-powerprofiles-set` on a sysfs signal. No UPower, no daemon.
+- Hz intent lives in `~/.local/state/omarchy/toggles/hypr/refresh-override-hz` plus the `hz_*` keys (shared contract with the future display plugin). The panel applies it with `hyprctl eval`.
+- The live rate is re-read in a short burst after open, event, or apply. No permanent poll.
+- Threshold uses UPower D-Bus (`EnableChargeThreshold`). A 10s watchdog kills hung queries.
 
 ## Update
 
@@ -119,26 +69,7 @@ omarchy restart shell
 omarchy plugin remove cyberdyne.battery
 ```
 
-Re-add `omarchy.power` to the bar if you want the stock widget back. Removal leaves the native `~/.local/state/omarchy/powerprofiles/` files untouched (they belong to Omarchy, not to this plugin).
-
-Plugin-owned state: `~/.local/state/omarchy/toggles/hypr/refresh-override-hz` (one file, the per-profile Hz override). Retention: kept across reinstalls so your per-profile rates survive. Removal: the plugin never deletes it silently. Confirm, then run once if you no longer want per-profile rates:
-
-```
-rm -f ~/.local/state/omarchy/toggles/hypr/refresh-override-hz
-```
-
-(without it, the next profile switch recreates it from that profile's rate).
-
-## Migrate from the old daemons
-
-Versions before v0.8.0 used `~/.local/bin/hypr-profile-auto` and `~/.local/bin/hypr-refresh-auto` started from `~/.config/hypr/autostart.lua`. They are no longer needed and must be removed, or they fight the panel every 5s:
-
-```
-pkill -f hypr-profile-auto; pkill -f hypr-refresh-auto
-rm -f ~/.local/bin/hypr-profile-auto ~/.local/bin/hypr-refresh-auto
-```
-
-Then delete their two `exec_on_start` lines in `~/.config/hypr/autostart.lua` and restart the shell. The old `ac-watch.log` can be deleted.
+Native profile files stay untouched. Delete `refresh-override-hz` by hand if you want the rates gone too.
 
 ## Changelog
 
