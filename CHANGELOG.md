@@ -4,6 +4,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## v0.8.0 — Built-in power and refresh ownership
+
 ### Added
 
 - Single owner for power and Hz: sysfs-driven profile restore plus direct `hyprctl eval` apply with live geometry. No `~/.local/bin` daemon needed.
@@ -23,8 +25,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Refresh toggle merged into the `POWER` section under the profile pills. Label reads `Refresh rate`, description reads desired vs live (`Balanced → 120Hz · now 120Hz`, `applying…` while a change lands).
+- Charge-threshold toggle re-reads state on every open and stays disabled with `Reading state…` until the first successful read, so it never flashes a wrong off state.
 - Use the sysfs-arbitrated source for source-dependent icon, status, and panel text.
-- Show whether the optional profile and refresh daemons are available.
 
 ## v0.7.0 — Instant AC/battery reaction
 

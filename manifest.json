@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Battery",
-    "description": "Manual profiles plus threshold toggle and drain history",
+    "description": "Per-source profiles, per-profile Hz, threshold toggle, drain history",
     "category": "System",
     "allowMultiple": false
   }
