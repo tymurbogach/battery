@@ -7,7 +7,7 @@ Keep changes small and reversible. One concern per commit.
 - Write English in commits and docs.
 - Use imperative commits (`Fix threshold read`, not `Fixed`).
 - Do not commit symlinks, install hooks, or privilege changes.
-- Do not bundle the optional daemons (`hypr-profile-auto`, `hypr-refresh-auto`). Document them instead.
+- Do not reintroduce `~/.local/bin` daemons. Profile restore and Hz apply belong to the panel.
 - Keep `manifest.json`, `README.md`, and `CHANGELOG.md` in sync on every version bump.
 
 ## Verify before push

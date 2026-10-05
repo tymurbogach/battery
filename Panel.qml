@@ -25,11 +25,11 @@ Panel {
   // icon-sized fraction of the slot the fallback assumes.
   readonly property real openPanelIndicatorWidth: showPercentage && !button.vertical ? button.glyphPaintedWidth : 0
 
-  // ---- Ownership note. Profile auto-switch on plug/unplug belongs to
-  // hypr-profile-auto (~/.local/bin, sysfs signal) plus the first-party
-  // omarchy.battery service; display refresh belongs to hypr-refresh-auto.
-  // This widget only picks profiles manually, toggles the charge threshold,
-  // and shows read-only status. One writer per subsystem.
+  // ---- Ownership note. This widget owns per-source profile restore
+  // (sysfs signal) and per-profile Hz apply (direct hyprctl, no daemon).
+  // The override file is the shared contract with the future display
+  // plugin: single desired rate, both sides write file plus hz_<profile>
+  // and watch the file. No ~/.local/bin daemon required.
   property bool chargeThresholdEnabled: false
   property string chargeThresholdError: ""
   property string batteryDbusPath: ""
@@ -42,6 +42,14 @@ Panel {
   property var appliedHz: null
   property int hzRevision: 0
   property string pendingProfile: ""
+  // Coalesced monitor read: set when a refresh arrives while hyprctl runs.
+  property bool monitorDirty: false
+  // Catch-up burst after open/event/apply: 0 idle, 1..2 pending retries.
+  property int catchUpStep: 0
+  // Rate waiting for monitor geometry before direct apply can run.
+  property var pendingHzApply: null
+  // Lid-closed flag: never force eDP-1 while set or while eDP-1 is off.
+  property bool internalMonitorDisabled: false
 
   // Keep command health independent. A successful system query must not hide
   // a failed battery or profile query from the user.
@@ -59,8 +67,6 @@ Panel {
   property string lastError: ""
   property string sourceError: ""
   property bool profileBusy: false
-  property bool profileAutoAvailable: false
-  property bool refreshAutoAvailable: false
 
   // Guarded bar theme access. bar is null during startup/recreation;
   // content must not throw TypeError in that window.
@@ -227,7 +233,13 @@ Panel {
   }
 
   function startRefresh(name, process) {
-    if (process.running) return
+    if (process.running) {
+      // Coalesce instead of dropping: a monitor request that lands while
+      // hyprctl runs relaunches once on exit. Other subsystems keep the
+      // old drop behavior through their own guards.
+      if (name === "monitor") root.monitorDirty = true
+      return
+    }
     var next = Object.assign({}, refreshAttempts)
     next[name] = (next[name] || 0) + 1
     refreshAttempts = next
@@ -290,10 +302,11 @@ Panel {
       if (idx >= 0) profileIndex = idx
     }
     // Enforce the per-profile Hz invariant when the active profile changed
-    // somewhere else (menu, CLI, plug/unplug service) while open.
+    // somewhere else (menu, CLI, plug/unplug, future display plugin).
+    // Runs even when closed so the override file never goes stale.
     // Mark applied only on successful write; queue pending otherwise.
     var desiredHz = root.hzForProfile(root.activeProfile)
-    if (root.opened && root.activeProfile !== "" && root.profiles.indexOf(root.activeProfile) >= 0
+    if (root.activeProfile !== "" && root.profiles.indexOf(root.activeProfile) >= 0
         && (!root.appliedHz || root.appliedHz.profile !== root.activeProfile
           || root.appliedHz.rate !== desiredHz)) {
       root.requestHzOverride(root.activeProfile, desiredHz)
@@ -302,7 +315,7 @@ Panel {
 
   // Manual pick for the current source (powerON = AC, powerOFF = battery).
   // omarchy-powerprofiles-set persists it in the native per-source state
-  // file; hypr-profile-auto restores it automatically on plug/unplug.
+  // file; restoreProfileForSource restores it automatically on plug/unplug.
   // The Hz override follows only after this command succeeds.
   function setProfile(profile) {
     if (!profile || root.profileBusy) return
@@ -312,10 +325,11 @@ Panel {
     actionProc.running = true
   }
 
-  // ---- Per-profile 120Hz toggle. The value is stored in settings under the
-  // profile's key and enforced through the override file that
-  // hypr-refresh-auto watches (60 or 120 only). The daemon applies it within
-  // seconds; the monitor line underneath shows the live rate.
+  // ---- Per-profile 120Hz toggle. The value is stored in settings under
+  // the profile's key and in the shared override file (60 or 120 only)
+  // that the future display plugin also reads and writes. This widget
+  // applies it directly with hyprctl within milliseconds; the monitor
+  // line underneath shows the live rate.
   function hzForProfile(profile) {
     var key = Model.hzSettingKey(profile)
     if (key === "") return 120
@@ -356,6 +370,92 @@ Panel {
     hzWriteProc.running = true
   }
 
+  function scheduleMonitorCatchUp() {
+    // Burst after open/event/apply: Hyprland settles async, so one
+    // immediate read always races. Two delayed retries catch the real mode
+    // without a permanent poll. Keeps running even if closed: it only
+    // stores currentMonitor for the next open.
+    root.catchUpStep = 0
+    monitorCatchUp.interval = 2500
+    monitorCatchUp.restart()
+  }
+
+  function monitorModeParams(rate) {
+    var m = root.currentMonitor
+    if (!m || m.disabled === true) return null
+    var w = Math.round(Number(m.width || 0))
+    var h = Math.round(Number(m.height || 0))
+    if (!(w > 0 && h > 0)) return null
+    var x = Math.round(Number(m.x || 0))
+    var y = Math.round(Number(m.y || 0))
+    var scale = Number(m.scale || 1.6)
+    if (!isFinite(scale) || scale <= 0) scale = 1.6
+    var output = String(m.name || "eDP-1")
+    if (output === "") output = "eDP-1"
+    return {
+      output: output,
+      mode: w + "x" + h + "@" + rate,
+      position: x + "x" + y,
+      scale: scale
+    }
+  }
+
+  function applyHzNow(rate) {
+    // Direct apply, no daemon. Skips while the lid flag is set or the
+    // monitor is off so we never fight a closed lid or an external-only
+    // setup. Queues for later when geometry is still unknown.
+    if (root.internalMonitorDisabled) return false
+    var live = Math.round(Number(root.currentMonitor ? root.currentMonitor.refreshRate : 0))
+    if (live === rate) return true
+    var p = root.monitorModeParams(rate)
+    if (!p) {
+      root.pendingHzApply = rate
+      startRefresh("monitor", monitorReadProc)
+      return false
+    }
+    if (hzApplyProc.running) {
+      root.pendingHzApply = rate
+      return false
+    }
+    var lua = 'hl.monitor({ output = "' + p.output + '", mode = "' + p.mode
+      + '", position = "' + p.position + '", scale = ' + p.scale + ' })'
+    hzApplyProc.command = ["hyprctl", "eval", lua]
+    hzApplyProc.running = true
+    return true
+  }
+
+  // External write to the shared file (future display plugin, echo test).
+  // Adopts it into the active profile so toggle and file never diverge.
+  // Own writes already match, so they fall through as no-ops.
+  // The file always wins: it is applied even when the profile list is
+  // still unknown (panel closed since boot), the settings adopt follows
+  // once profiles load.
+  function handleOverrideFile(text) {
+    var rate = Model.parseOverrideHz(text)
+    if (rate !== 60 && rate !== 120) return
+    if (root.inFlightHz && root.inFlightHz.rate === rate) return
+    var profile = root.activeProfile
+    if (root.appliedHz && root.appliedHz.profile === profile && root.appliedHz.rate === rate) return
+    if (!profile || root.profiles.indexOf(profile) < 0) {
+      root.appliedHz = ({ profile: profile, rate: rate })
+      root.applyHzNow(rate)
+      root.scheduleMonitorCatchUp()
+      return
+    }
+    if (root.hzForProfile(profile) !== rate) {
+      var key = Model.hzSettingKey(profile)
+      if (key !== "") {
+        var patch = {}
+        patch[key] = rate
+        root.updateSettings(patch)
+      }
+    }
+    root.appliedHz = ({ profile: profile, rate: rate })
+    root.pendingHzApply = null
+    root.applyHzNow(rate)
+    root.scheduleMonitorCatchUp()
+  }
+
   function toggleHz() {
     var profile = root.activeProfile
     if (!profile || root.profiles.indexOf(profile) < 0) return
@@ -367,10 +467,11 @@ Panel {
     root.updateSettings(patch)
     root.requestHzOverride(profile, next)
     startRefresh("monitor", monitorReadProc)
+    root.scheduleMonitorCatchUp()
   }
 
-  // Read-only monitor discovery for the status line. Refresh rate is owned
-  // by hypr-refresh-auto -- this never writes monitor configuration.
+  // Live monitor discovery for the status line. On every read, retry a
+  // queued direct apply whose geometry was unknown at request time.
   function handleMonitorsOutput(text) {
     var parsed = null
     try { parsed = JSON.parse(String(text || "")) } catch (e) { parsed = null }
@@ -378,10 +479,15 @@ Panel {
     for (var i = 0; i < parsed.length; i++) {
       if (parsed[i] && parsed[i].focused) {
         root.currentMonitor = parsed[i]
-        return true
+        break
       }
+      if (i === parsed.length - 1) root.currentMonitor = parsed[0]
     }
-    root.currentMonitor = parsed[0]
+    if (root.pendingHzApply === 60 || root.pendingHzApply === 120) {
+      var rate = root.pendingHzApply
+      root.pendingHzApply = null
+      root.applyHzNow(rate)
+    }
     return true
   }
 
@@ -451,8 +557,20 @@ Panel {
   // 2. Kernel uevents via udevadm monitor while open (immune to stale UPower).
   // 3. The 15s poll stays as safety net for missed signals.
   // Every trigger runs the one-shot sysfs probe; sysfs wins disagreements.
+  // On flip the panel itself restores the remembered profile for the new
+  // source (replaces hypr-profile-auto) and the Hz enforce in
+  // updateProfiles applies that profile's rate directly (no daemon).
   function probeAcSource() {
     if (!acProbeProc.running) acProbeProc.running = true
+  }
+
+  function restoreProfileForSource(src) {
+    if (src !== "ac" && src !== "battery") return
+    if (root.profileBusy || actionProc.running) return
+    root.profileBusy = true
+    root.pendingProfile = ""
+    actionProc.command = ["omarchy-powerprofiles-set", src]
+    actionProc.running = true
   }
 
   function handleAcProbe(code) {
@@ -467,24 +585,8 @@ Panel {
       // Source flipped: refresh text fields now instead of next poll tick.
       root.refresh()
       startRefresh("monitor", monitorReadProc)
-    }
-  }
-
-  function daemonPath(name) {
-    var home = Quickshell.env("HOME") || ""
-    return home ? home + "/.local/bin/" + name : ""
-  }
-
-  function probeDaemons() {
-    var profilePath = daemonPath("hypr-profile-auto")
-    var refreshPath = daemonPath("hypr-refresh-auto")
-    if (profilePath && !profileAutoProc.running) {
-      profileAutoProc.command = ["bash", "-c", 'test -x "$1"', "_", profilePath]
-      profileAutoProc.running = true
-    }
-    if (refreshPath && !refreshAutoProc.running) {
-      refreshAutoProc.command = ["bash", "-c", 'test -x "$1"', "_", refreshPath]
-      refreshAutoProc.running = true
+      root.scheduleMonitorCatchUp()
+      root.restoreProfileForSource(src)
     }
   }
 
@@ -513,8 +615,8 @@ Panel {
 
       refresh()
       root.probeAcSource()
-      root.probeDaemons()
       startRefresh("monitor", monitorReadProc)
+      root.scheduleMonitorCatchUp()
       if (!udevMonProc.running) udevMonProc.running = true
       var idx = profiles.indexOf(activeProfile)
       profileIndex = idx >= 0 ? idx : 0
@@ -537,6 +639,7 @@ Panel {
       root.probeAcSource()
       root.refresh()
       startRefresh("monitor", monitorReadProc)
+      root.scheduleMonitorCatchUp()
     }
   }
 
@@ -616,20 +719,6 @@ Panel {
     onExited: function(code) { root.handleAcProbe(code) }
   }
 
-  Process {
-    id: profileAutoProc
-    stdout: StdioCollector { waitForEnd: true }
-    stderr: StdioCollector { waitForEnd: true }
-    onExited: function(code) { root.profileAutoAvailable = code === 0 }
-  }
-
-  Process {
-    id: refreshAutoProc
-    stdout: StdioCollector { waitForEnd: true }
-    stderr: StdioCollector { waitForEnd: true }
-    onExited: function(code) { root.refreshAutoAvailable = code === 0 }
-  }
-
   // Kernel uevents for power_supply while the panel is open. A plug or
   // unplug wakes this instantly even when UPower records go stale.
   // Long-running by design: the watchdog must never kill it.
@@ -690,7 +779,8 @@ Panel {
     }
   }
 
-  // Read-only: feeds the refresh status line. Never writes monitors.
+  // Live rate for the status line. Coalesced: a request that lands while
+  // hyprctl runs relaunches once here instead of being dropped.
   Process {
     id: monitorReadProc
     command: ["hyprctl", "monitors", "-j"]
@@ -703,10 +793,15 @@ Panel {
       if (code !== 0) root.noteRefreshFailure("monitor", "hyprctl monitors exit " + code
         + (monitorStderr.text ? ": " + String(monitorStderr.text).trim().slice(0, 120) : ""))
       else root.noteRefreshSuccess("monitor")
+      if (root.monitorDirty) {
+        root.monitorDirty = false
+        root.startRefresh("monitor", monitorReadProc)
+        stallTimer.restart()
+      }
     }
   }
 
-  // Writes the per-profile Hz override file watched by hypr-refresh-auto.
+  // Writes the shared Hz override file, then applies it directly.
   Process {
     id: hzWriteProc
     stderr: StdioCollector { waitForEnd: true; id: hzWriteStderr }
@@ -717,6 +812,8 @@ Panel {
         root.appliedHz = completed
         if (root.requestedHz && root.requestedHz.revision === completed.revision) root.requestedHz = null
         root.lastError = ""
+        root.applyHzNow(completed.rate)
+        root.scheduleMonitorCatchUp()
       } else {
         root.lastError = "Hz override write failed (exit " + code + ")"
         if (hzWriteStderr.text) root.lastError += ": " + String(hzWriteStderr.text).trim().slice(0, 120)
@@ -726,16 +823,81 @@ Panel {
     }
   }
 
+  // Direct Hz apply. No daemon: hyprctl eval with the current geometry.
+  Process {
+    id: hzApplyProc
+    stderr: StdioCollector { waitForEnd: true; id: hzApplyStderr }
+    onExited: function(code) {
+      if (code !== 0) {
+        root.lastError = "Hz apply failed (exit " + code + ")"
+        if (hzApplyStderr.text) root.lastError += ": " + String(hzApplyStderr.text).trim().slice(0, 120)
+      } else if (root.pendingHzApply === 60 || root.pendingHzApply === 120) {
+        var rate = root.pendingHzApply
+        root.pendingHzApply = null
+        root.applyHzNow(rate)
+      }
+      root.scheduleMonitorCatchUp()
+    }
+  }
+
+  // Shared override file with the future display plugin. Watched so a
+  // change on either side lands instantly without polling. The directory
+  // watch covers first creation (FileView cannot watch a missing file).
+  FileView {
+    id: hzOverrideFile
+    path: root.hzOverrideDir() + "/refresh-override-hz"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.handleOverrideFile(text())
+  }
+  FileView {
+    path: root.hzOverrideDir()
+    watchChanges: true
+    printErrors: false
+    onFileChanged: hzOverrideFile.reload()
+  }
+  // Lid-closed flag: while present never force the internal panel.
+  FileView {
+    path: root.hzOverrideDir() + "/internal-monitor-disable.conf"
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.internalMonitorDisabled = true
+    onLoadFailed: root.internalMonitorDisabled = false
+    onFileChanged: reload()
+  }
+
   Component.onCompleted: {
-    if (root.batteryPresent) startRefresh("monitor", monitorReadProc)
+    if (root.batteryPresent) {
+      startRefresh("monitor", monitorReadProc)
+      root.probeAcSource()
+      root.scheduleMonitorCatchUp()
+    }
   }
 
   // Main poll: 15s while open. UPower displayDevice already pushes
   // presence/state reactively; this only refreshes CLI text fields.
   Timer { interval: 15000; running: root.opened; repeat: true; onTriggered: root.refresh() }
 
-  // Monitor rate is informational and changes rarely; 30s is enough.
-  Timer { interval: 30000; running: root.opened; repeat: true; onTriggered: root.startRefresh("monitor", monitorReadProc) }
+  // Catch-up burst, not a poll: immediate read already fired at the
+  // event, these two delayed retries catch Hyprland after it settles.
+  // Runs to completion even if closed; it only stores currentMonitor.
+  Timer {
+    id: monitorCatchUp
+    interval: 2500
+    repeat: false
+    onTriggered: {
+      root.startRefresh("monitor", monitorReadProc)
+      stallTimer.restart()
+      if (root.catchUpStep === 0) {
+        root.catchUpStep = 1
+        monitorCatchUp.interval = 6000
+        monitorCatchUp.restart()
+      } else {
+        root.catchUpStep = 0
+      }
+    }
+  }
 
   // A hung CLI would freeze refresh forever since a running Process
   // cannot restart. Kill stragglers so the next tick recovers.
@@ -749,16 +911,26 @@ Panel {
       var systemStalled = systemProc.running
       var monitorStalled = monitorReadProc.running
       var probeStalled = acProbeProc.running
+      var hzWriteStalled = hzWriteProc.running
+      var hzApplyStalled = hzApplyProc.running
       if (batteryStalled) batteryProc.running = false
       if (profilesStalled) profilesProc.running = false
       if (systemStalled) systemProc.running = false
       if (monitorStalled) monitorReadProc.running = false
       if (probeStalled) acProbeProc.running = false
+      if (hzWriteStalled) hzWriteProc.running = false
+      if (hzApplyStalled) hzApplyProc.running = false
       if (batteryStalled) root.noteRefreshFailure("battery", "battery timeout, retrying")
       if (profilesStalled) root.noteRefreshFailure("profiles", "profiles timeout, retrying")
       if (systemStalled) root.noteRefreshFailure("system", "system timeout, retrying")
       if (monitorStalled) root.noteRefreshFailure("monitor", "monitor timeout, retrying")
       if (probeStalled) root.sourceError = "Power source probe timed out"
+      if (hzWriteStalled || hzApplyStalled) root.lastError = "Hz apply timed out, retrying"
+      if (root.monitorDirty) {
+        root.monitorDirty = false
+        root.startRefresh("monitor", monitorReadProc)
+      }
+      root.flushHzOverride()
     }
   }
 
@@ -1069,8 +1241,7 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            text: root.profileAutoAvailable ? "Auto-switch: hypr-profile-auto daemon"
-              : "Auto-switch unavailable: hypr-profile-auto not found"
+            text: "Auto-switch: built-in (sysfs, per source)"
             color: root.fg
             opacity: 0.6
             font.family: root.ff
@@ -1080,8 +1251,9 @@ Panel {
           }
         }
 
-        // ---------- Refresh: one 120Hz toggle per profile. The daemon
-        // enforces the override file within seconds. ------------------------
+        // ---------- Refresh: one 120Hz toggle per profile. Applied
+        // directly with hyprctl; the shared file stays as contract with
+        // the future display plugin. ----------------------------------
         Column {
           width: parent.width
           spacing: Style.space(10)
@@ -1097,8 +1269,7 @@ Panel {
           Toggle {
             width: parent.width
             label: "120Hz in " + Model.prettyProfile(root.activeProfile)
-            description: root.refreshAutoAvailable ? root.monitorStatusText
-              : root.monitorStatusText + " · hypr-refresh-auto not found"
+            description: root.monitorStatusText
             checked: root.hzForProfile(root.activeProfile) === 120
             enabled: root.profiles.indexOf(root.activeProfile) >= 0 && !root.profileBusy
             foreground: root.fg

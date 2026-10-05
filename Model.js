@@ -165,8 +165,21 @@ function appendDrainSample(samples, watts, now, maxAgeSeconds) {
   return next
 }
 
+// Shared Hz contract with the future display plugin. The override file
+// holds a single desired rate ("60" or "120"). Both UIs write the file
+// plus the hz_<active profile> setting and watch the file for the other
+// side. Permissive like the old daemon's `tr -cd '0-9'`: "120Hz" counts
+// as 120. Anything else is null and must be ignored.
+function parseOverrideHz(raw) {
+  var text = String(raw == null ? "" : raw)
+  var digits = text.replace(/[^0-9]/g, "")
+  if (digits === "60") return 60
+  if (digits === "120") return 120
+  return null
+}
+
 // ---- Per-profile 120Hz toggle. Each power profile remembers its own
-// refresh rate (60 or 120); hypr-refresh-auto enforces the override file.
+// refresh rate (60 or 120); the panel applies the override file directly.
 function defaultHzForProfile(profile) {
   if (profile === "power-saver") return 60
   return 120
@@ -237,6 +250,7 @@ if (typeof module !== "undefined") {
     hzSettingKey: hzSettingKey,
     normalizeHz: normalizeHz,
     hzForProfile: hzForProfile,
+    parseOverrideHz: parseOverrideHz,
     prettyProfile: prettyProfile,
     probeSourceFromExit: probeSourceFromExit,
     effectiveSource: effectiveSource,

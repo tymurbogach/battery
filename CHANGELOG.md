@@ -4,6 +4,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Added
+
+- Single owner for power and Hz: sysfs-driven profile restore plus direct `hyprctl eval` apply with live geometry. No `~/.local/bin` daemon needed.
+- Shared Hz contract for the future display plugin: single-rate override file plus per-profile keys, watched instantly on both sides.
+- Catch-up burst for the live `now` rate (immediate plus 2.5s plus 8s) after open, cable event, file change, or apply. Coalesced reads instead of silent drops.
+
+### Removed
+
+- Dependency on `hypr-profile-auto` and `hypr-refresh-auto`. Delete them plus their `autostart.lua` lines on upgrade. The 30s monitor poll is gone.
+
 ### Fixed
 
 - Queue refresh-rate writes so rapid changes persist only the newest value.

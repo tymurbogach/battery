@@ -28,6 +28,15 @@ test("drain history retains zero watts and bounds its window", () => {
   assert.deepEqual(pruned, [{ t: 701, w: 10 }])
 })
 
+test("override file accepts only 60 or 120", () => {
+  assert.equal(Model.parseOverrideHz("120"), 120)
+  assert.equal(Model.parseOverrideHz("60\n"), 60)
+  assert.equal(Model.parseOverrideHz("120Hz"), 120)
+  assert.equal(Model.parseOverrideHz("garbage"), null)
+  assert.equal(Model.parseOverrideHz(""), null)
+  assert.equal(Model.parseOverrideHz(null), null)
+})
+
 test("profiles preserve their active item and selection bounds", () => {
   const parsed = Model.parseProfiles("balanced\t1\nperformance\t0\n", 8)
   assert.deepEqual(parsed, {
