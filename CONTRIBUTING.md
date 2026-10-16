@@ -17,7 +17,7 @@ Run from the repo root:
 ```bash
 omarchy plugin validate .
 qmllint -I "$OMARCHY_PATH/shell" Panel.qml
-node --test test/model.test.js
+node --test tests/model.test.js
 ```
 
 From-zero install against the exact ID:
@@ -37,7 +37,7 @@ Then check the visible feature, `omarchy plugin list --json`, disable, enable, r
 `Model.js` exports through `module.exports` for Node. Run its regression suite with:
 
 ```bash
-node --test test/model.test.js
+node --test tests/model.test.js
 ```
 
 On a live shell, change the Hz toggle twice before the first write ends. The final override must match the final toggle state. Then fail a profile command and confirm that the override does not change.

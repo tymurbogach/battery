@@ -4,6 +4,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Fixed
+
+- Boot on AC after a battery shutdown no longer sticks at 60Hz with the panel closed. Source probe, profile list, and Hz enforce now run at startup without UPower or opening the panel, with a one-shot retry until reconciled. Restore no longer loses its follow-up list read when it races the query.
+
 ## v0.8.1 — Plugin id rename
 
 ### Changed

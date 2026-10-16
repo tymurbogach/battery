@@ -47,6 +47,11 @@ Panel {
   property string pendingProfile: ""
   // Coalesced monitor read: set when a refresh arrives while hyprctl runs.
   property bool monitorDirty: false
+  // Same coalescing for the profile list: a restore that lands while the
+  // list query runs must relaunch once on exit instead of being dropped.
+  // Without this the Hz enforce in updateProfiles never sees the restored
+  // profile and the monitor stays on the old rate until the panel opens.
+  property bool profilesDirty: false
   // Catch-up burst after open/event/apply: 0 idle, 1..2 pending retries.
   property int catchUpStep: 0
   // Rate waiting for monitor geometry before direct apply can run.
@@ -222,19 +227,24 @@ Panel {
   }
 
   function refresh() {
-    if (!batteryPresent) return
     stallTimer.restart()
-    startRefresh("battery", batteryProc)
+    // Battery text needs UPower; profiles/Hz do not (sysfs + powerprofilesctl
+    // work while UPower is still starting). Gate only the battery queries so
+    // a boot with slow UPower still restores the profile and the rate.
+    if (batteryPresent) {
+      startRefresh("battery", batteryProc)
+      startRefresh("system", systemProc)
+    }
     startRefresh("profiles", profilesProc)
-    startRefresh("system", systemProc)
   }
 
   function startRefresh(name, process) {
     if (process.running) {
-      // Coalesce instead of dropping: a monitor request that lands while
-      // hyprctl runs relaunches once on exit. Other subsystems keep the
-      // old drop behavior through their own guards.
+      // Coalesce instead of dropping: a monitor or profiles request that
+      // lands while its query runs relaunches once on exit. Other subsystems
+      // keep the old drop behavior through their own guards.
       if (name === "monitor") root.monitorDirty = true
+      else if (name === "profiles") root.profilesDirty = true
       return
     }
     var next = Object.assign({}, refreshAttempts)
@@ -424,17 +434,22 @@ Panel {
   // External write to the shared file (future display plugin, echo test).
   // Adopts it into the active profile so toggle and file never diverge.
   // Own writes already match, so they fall through as no-ops.
-  // The file always wins: it is applied even when the profile list is
-  // still unknown (panel closed since boot), the settings adopt follows
-  // once profiles load.
+  // The file always wins once the profile list is known: it is applied
+  // even when the panel stayed closed since boot, the settings adopt
+  // follows once profiles load. While the list is still unknown only the
+  // live mode is applied; appliedHz stays null so updateProfiles enforces
+  // the restored profile's rate instead of trusting a stale file.
   function handleOverrideFile(text) {
     var rate = Model.parseOverrideHz(text)
     if (rate !== 60 && rate !== 120) return
-    if (root.inFlightHz && root.inFlightHz.rate === rate) return
+    // Local intent wins while a write is queued or in flight. A stale file
+    // event (boot watcher delay, initial load racing the restore) must not
+    // adopt into settings nor re-apply the old rate mid-restore. The write
+    // completion marks appliedHz and overwrites the file.
+    if (root.requestedHz || root.inFlightHz) return
     var profile = root.activeProfile
     if (root.appliedHz && root.appliedHz.profile === profile && root.appliedHz.rate === rate) return
     if (!profile || root.profiles.indexOf(profile) < 0) {
-      root.appliedHz = ({ profile: profile, rate: rate })
       root.applyHzNow(rate)
       root.scheduleMonitorCatchUp()
       return
@@ -640,7 +655,19 @@ Panel {
     }
   }
 
-  onBatteryPresentChanged: if (!batteryPresent) close()
+  onBatteryPresentChanged: {
+    if (!batteryPresent) {
+      close()
+      return
+    }
+    // UPower arrived late (common at boot): the onCompleted probe ran
+    // without it. Reconcile now so a closed panel still restores.
+    root.probeAcSource()
+    root.refresh()
+    root.startRefresh("monitor", monitorReadProc)
+    root.scheduleMonitorCatchUp()
+    bootReconcile.restart()
+  }
 
   // Same signal the first-party omarchy.battery service uses.
   Connections {
@@ -676,6 +703,11 @@ Panel {
     onExited: function(code) {
       if (code !== 0) root.noteRefreshFailure("profiles", "profiles exit " + code
         + (profilesStderr.text ? ": " + String(profilesStderr.text).trim().slice(0, 120) : ""))
+      if (root.profilesDirty) {
+        root.profilesDirty = false
+        root.startRefresh("profiles", profilesProc)
+        stallTimer.restart()
+      }
     }
   }
 
@@ -702,8 +734,14 @@ Panel {
         if (actionStderr.text) root.lastError += ": " + String(actionStderr.text).trim().slice(0, 120)
       } else {
         root.lastError = ""
-        root.requestHzOverride(profile, root.hzForProfile(profile))
+        // Manual pick carries its profile; a source restore (profile === "")
+        // leaves the Hz to updateProfiles after the follow-up list lands.
+        // omarchy-powerprofiles-set prints nothing on restore, so the list
+        // re-read is the only way to learn the restored profile.
+        if (profile !== "") root.requestHzOverride(profile, root.hzForProfile(profile))
       }
+      // Queued via profilesDirty when the list query is still running, so
+      // the restored profile is never missed even when closed.
       root.refresh()
     }
   }
@@ -879,11 +917,15 @@ Panel {
   }
 
   Component.onCompleted: {
-    if (root.batteryPresent) {
-      startRefresh("monitor", monitorReadProc)
-      root.probeAcSource()
-      root.scheduleMonitorCatchUp()
-    }
+    // Boot reconcile runs closed: sysfs + powerprofilesctl work before UPower
+    // is ready. The one-shot bootReconcile below retries until source and
+    // profiles are known, so opening the panel is never required.
+    stallTimer.restart()
+    startRefresh("monitor", monitorReadProc)
+    root.probeAcSource()
+    root.startRefresh("profiles", profilesProc)
+    root.scheduleMonitorCatchUp()
+    bootReconcile.restart()
   }
 
   // Main poll: 15s while open. UPower displayDevice already pushes
@@ -941,7 +983,30 @@ Panel {
         root.monitorDirty = false
         root.startRefresh("monitor", monitorReadProc)
       }
+      if (root.profilesDirty) {
+        root.profilesDirty = false
+        root.startRefresh("profiles", profilesProc)
+      }
       root.flushHzOverride()
+    }
+  }
+
+  // Boot reconcile, not a poll: retries source + profiles + monitor only
+  // until both are known, then stops. Covers slow UPower at boot while the
+  // panel stays closed. The 15s open poll and event paths handle the rest.
+  Timer {
+    id: bootReconcile
+    interval: 5000
+    repeat: true
+    onTriggered: {
+      if (root.acSource === "" || root.profiles.length === 0) {
+        root.probeAcSource()
+        root.startRefresh("profiles", profilesProc)
+        root.startRefresh("monitor", monitorReadProc)
+        stallTimer.restart()
+      } else {
+        bootReconcile.stop()
+      }
     }
   }
 
