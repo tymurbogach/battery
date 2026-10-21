@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Services.UPower
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -78,7 +79,7 @@ Panel {
 
   // Guarded bar theme access. bar is null during startup/recreation;
   // content must not throw TypeError in that window.
-  readonly property color fg: root.bar ? root.bar.foreground : Color.foreground
+  readonly property color fg: root.bar ? root.bar.foreground : Commons.Color.foreground
   readonly property string ff: root.bar ? root.bar.fontFamily : Style.font.family
 
   // Sysfs truth for the AC/battery source. UPower's OnBattery can freeze
@@ -1335,7 +1336,7 @@ Panel {
             checked: root.hzForProfile(root.activeProfile) === 120
             enabled: root.profiles.indexOf(root.activeProfile) >= 0 && !root.profileBusy
             foreground: root.fg
-            accent: Color.accent
+            accent: Commons.Color.accent
             fontFamily: root.ff
             onClicked: root.toggleHz()
           }
@@ -1367,7 +1368,7 @@ Panel {
               checked: root.chargeThresholdEnabled
               enabled: root.chargeThresholdKnown && !chargeThresholdActionProc.running
               foreground: root.fg
-              accent: Color.accent
+              accent: Commons.Color.accent
               fontFamily: root.ff
               onClicked: root.toggleChargeThreshold()
             }
@@ -1440,7 +1441,7 @@ Panel {
                 var plotHeight = height - topInset - bottomInset
                 if (plotHeight <= 0) return
 
-                ctx.strokeStyle = Style.selectedStateColor(root.fg, Color.accent)
+                ctx.strokeStyle = Style.selectedStateColor(root.fg, Commons.Color.accent)
                 ctx.lineWidth = 1.5
                 ctx.beginPath()
                 var started = false
