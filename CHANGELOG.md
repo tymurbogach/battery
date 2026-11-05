@@ -2,6 +2,12 @@
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.8.2 — Omarchy 4.5 compatibility
+
+### Fixed
+
+- Keep the percentage and battery icon legible in the updated bar.
+
 ## Unreleased
 
 ### Fixed

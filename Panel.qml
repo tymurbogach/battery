@@ -1064,13 +1064,19 @@ Panel {
     anchors.fill: parent
     bar: root.bar
     Accessible.name: "Battery " + root.buttonTooltip
-    text: {
-      var icon = root.batteryIcon()
-      if (!(root.showPercentage && !vertical)) return icon
+    text: root.batteryIcon()
+    labelText: {
+      if (!(root.showPercentage && !vertical)) return ""
       var f = root.batteryFraction
-      return (isFinite(f) ? Math.round(f * 100) + "% " : "— ") + icon
+      return isFinite(f) ? Math.round(f * 100) + "%" : "—"
     }
-    slotSize: Style.bar.iconSlot * (root.showPercentage && !vertical ? 2 : 1)
+    slotSize: labelText !== "" ? Style.bar.iconSlot + percentageMetrics.advanceWidth + Style.space(4) : Style.bar.iconSlot
+    TextMetrics {
+      id: percentageMetrics
+      font.family: button.fontFamily
+      font.pixelSize: button.fontSize
+      text: button.labelText
+    }
     tooltipText: root.buttonTooltip
     onPressed: function(b) {
       if (!root.batteryPresent) return
